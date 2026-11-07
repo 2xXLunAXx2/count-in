@@ -184,6 +184,8 @@ export async function patchEvent(ev, patch, scope = 'one') {
 
 export async function createEvent(calId, body) {
   const ev = await withSession(() => backend().createEvent(calId, body));
+  // Google answers a repeating event with the series itself, so the dates come from a sync.
+  if (body.recurrence) { await sync(); return ev; }
   replaceLocal(ev);
   state.categories = ensureCategories(state.events, state.calendars, state.categories);
   save('categories');

@@ -3,6 +3,8 @@ import { norm, parseClock } from './util.js';
 
 export const LEG_KINDS = { walk: 'Walk', train: 'Train', bus: 'Bus', car: 'Lift', stop: 'Stop' };
 export const isTransit = leg => leg.kind === 'train' || leg.kind === 'bus' || leg.kind === 'car';
+// Time spent waiting for a ride is logged under its own id, so it never changes the ride's average.
+export const waitId = legId => `${legId}~wait`;
 
 const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 

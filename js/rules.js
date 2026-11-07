@@ -10,6 +10,17 @@ export const GOOGLE_COLORS = {
 const MAX_BEFORE = 40320; // Google's limit: 4 weeks
 const MAX_REMINDERS = 5;  // Google's limit per event
 
+// How a new event repeats, as Google's rule. `until` is the last day it may happen.
+export const REPEATS = { daily: 'FREQ=DAILY', workweek: 'FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH', weekly: 'FREQ=WEEKLY', biweekly: 'FREQ=WEEKLY;INTERVAL=2', monthly: 'FREQ=MONTHLY' };
+export function repeatRule(repeat, { until = '', allDay = false } = {}) {
+  if (!REPEATS[repeat]) return null;
+  if (!until) return [`RRULE:${REPEATS[repeat]}`];
+  const day = until.replace(/-/g, '');
+  // An all-day event ends on a date; a timed one by the end of that day, in UTC as Google asks.
+  const end = allDay ? day : new Date(`${until}T23:59:59`).toISOString().replace(/[-:]|\.\d+/g, '');
+  return [`RRULE:${REPEATS[repeat]};UNTIL=${end}`];
+}
+
 export const writable = cal => !!cal && (cal.accessRole === 'owner' || cal.accessRole === 'writer');
 
 const HEBREW = /[֐-׿]/;

@@ -27,6 +27,12 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
     if (router) return router.departAfter(from, to, after);
     try { return planDeparture(net, { from, to, dateMs: dayMs, departAfter: after, transfer }); } catch { return null; }
   };
+  // The earliest arrival, but setting off only when needed for it, so waiting at a station
+  // shows as free time where you are instead of as travel.
+  const leaveAfter = (from, to, after) => {
+    const j = departAfter(from, to, after);
+    return (j && arriveBy(from, to, j.arrive, j.arrive)) || j;
+  };
 
   let cur = homeKnown ? home : null;
   let busyUntil = null;
@@ -51,13 +57,10 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
       let journey = arriveBy(cur, place, startMin - early, startMin);
       let late = 0, leaveEarly = 0;
       if (!journey || (busyMin != null && journey.depart < busyMin)) {
-        const forward = departAfter(cur, place, busyMin ?? 0);
-        if (forward) {
-          // With nothing earlier in the day, the search starts at midnight. Set off only when
-          // needed for that arrival, or the trip would count every hour since midnight.
-          journey = (busyMin == null && arriveBy(cur, place, forward.arrive, forward.arrive)) || forward;
-          late = Math.max(0, journey.arrive - startMin);
-        }
+        // With nothing earlier in the day this searches from midnight, which is why setting
+        // off only when needed matters: otherwise the trip counts every hour since then.
+        const forward = leaveAfter(cur, place, busyMin ?? 0);
+        if (forward) { journey = forward; late = Math.max(0, forward.arrive - startMin); }
         else if (journey) leaveEarly = busyMin - journey.depart;
       }
       if (journey) {
@@ -77,7 +80,7 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
   let homeAt = null;
   if (homeKnown && cur && busyUntil != null) {
     if (!same(cur, home)) {
-      const j = departAfter(cur, home, toMin(busyUntil));
+      const j = leaveAfter(cur, home, toMin(busyUntil));
       if (j) {
         items.push({ kind: 'travel', from: cur, to: home, home: true, journey: j, late: 0, leaveEarly: 0, start: toMs(j.depart), end: toMs(j.arrive) });
         homeAt = toMs(j.arrive);

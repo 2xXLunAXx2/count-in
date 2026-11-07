@@ -2,7 +2,7 @@
 import { state, save, emit } from '../store.js';
 import { h, uid, norm, ymd, parseYmd, fmt, pad } from '../util.js';
 import { placeNames } from '../core.js';
-import { LEG_KINDS, isTransit, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom } from '../myroutes.js';
+import { LEG_KINDS, isTransit, waitId, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom } from '../myroutes.js';
 import { dialog, toast, icon, confirmDialog } from '../ui.js';
 
 const persist = (...keys) => { save(...keys); emit(); };
@@ -133,11 +133,12 @@ export function openRouteEditor(existing, preset = {}) {
 const clockSum = (route, stats) => route.legs.filter(l => !l.optional).reduce((s, l) => s + legMinutes(l, stats), 0);
 
 function legHistory(route, stats) {
-  const logged = route.legs.filter(l => stats.has(l.id));
+  const logged = route.legs.filter(l => stats.has(l.id) || stats.has(waitId(l.id)));
   if (!logged.length) return null;
+  const samplesOf = l => state.legSamples.filter(s => s.legId === l.id || s.legId === waitId(l.id)).sort((a, b) => (a.date < b.date ? 1 : -1));
   return h('details', { class: 'j-details' }, h('summary', null, 'Timed history'),
-    h('ul', { class: 'walk-history' }, logged.flatMap(l => state.legSamples.filter(s => s.legId === l.id).sort((a, b) => (a.date < b.date ? 1 : -1)).map(s => h('li', null,
-      h('span', { dir: 'auto' }, `${legLabel(l)}, ${fmt(parseYmd(s.date), { day: 'numeric', month: 'short' })}`),
+    h('ul', { class: 'walk-history' }, logged.flatMap(l => samplesOf(l).map(s => h('li', null,
+      h('span', { dir: 'auto' }, `${s.legId === l.id ? '' : 'Waiting for '}${legLabel(l)}, ${fmt(parseYmd(s.date), { day: 'numeric', month: 'short' })}`),
       h('span', { class: 'mono' }, `${s.minutes} min`),
       h('button', { class: 'icon-btn', 'aria-label': `Remove ${s.minutes} minute time for ${legLabel(l)}`, onclick: () => {
         state.legSamples = state.legSamples.filter(x => x !== s);
@@ -170,8 +171,9 @@ function routeRow(route, stats) {
       h('span', { class: 'route-total' }, `${clockSum(route, stats)} min`)),
     preview ? h('div', { class: 'ribbon', 'aria-hidden': 'true' }, preview.legs.map(l => h('i', { class: l.type === 'walk' ? 'walk' : l.type === 'stop' ? 'stop' : l.mode, style: { flex: Math.max(l.min, 1) } }))) : null,
     h('ol', { class: 'route-steps' }, route.legs.map(l => {
-      const s = stats.get(l.id);
-      return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), `, ${legMinutes(l, stats)} min`, s ? ` (average of ${s.count})` : '', l.optional ? ', only sometimes' : '', isTransit(l) ? scheduleText(l) : '');
+      const s = stats.get(l.id), w = stats.get(waitId(l.id));
+      return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), `, ${legMinutes(l, stats)} min`, s ? ` (average of ${s.count})` : '',
+        w ? `, after waiting ${w.avg} min on average` : '', l.optional ? ', only sometimes' : '', isTransit(l) ? scheduleText(l) : '');
     })),
     legHistory(route, stats),
     h('div', { class: 'row gap wrap route-actions' },
@@ -184,7 +186,7 @@ function routeRow(route, stats) {
       } }, 'Add way back'),
       h('button', { class: 'btn danger-ghost', onclick: async () => {
         if (await confirmDialog({ title: `Remove "${route.name}"?`, body: `${route.from} to ${route.to}. Its timed history is removed too.`, action: 'Remove route', danger: true })) {
-          const ids = new Set(route.legs.map(l => l.id));
+          const ids = new Set(route.legs.flatMap(l => [l.id, waitId(l.id)]));
           state.myRoutes = state.myRoutes.filter(r => r !== route);
           state.legSamples = state.legSamples.filter(s => !ids.has(s.legId));
           persist('myRoutes', 'legSamples');
@@ -280,13 +282,23 @@ function nextStep(skip = false) {
   persist('trip');
 }
 
+// Waiting from reaching the stop to boarding. Zero is a real answer: the bus was there.
+function boarded() {
+  const trip = state.trip, leg = tripRoute().legs[trip.index], now = Date.now();
+  trip.laps.push({ legId: waitId(leg.id), of: leg.id, wait: true, minutes: Math.max(0, Math.round((now - trip.stepStart) / 60000)) });
+  trip.boarded = true;
+  trip.stepStart = now;
+  persist('trip');
+}
+
 function openTripReview() {
   const trip = state.trip, route = tripRoute();
-  const rows = trip.laps.map(lap => ({ ...lap, leg: route.legs.find(l => l.id === lap.legId), keep: true }));
+  const rows = trip.laps.map(lap => ({ ...lap, leg: route.legs.find(l => l.id === (lap.of || lap.legId)), keep: true }));
+  const label = r => (r.wait ? `Waiting for ${legLabel(r.leg)}` : legLabel(r.leg));
   const end = () => { state.trip = null; };
   const { close } = dialog(h('form', { class: 'review', onsubmit: e => {
     e.preventDefault();
-    const kept = rows.filter(r => r.keep && r.minutes >= 1);
+    const kept = rows.filter(r => r.keep && r.minutes >= (r.wait ? 0 : 1));
     state.legSamples = [...state.legSamples, ...kept.map(r => ({ id: uid(), legId: r.legId, minutes: r.minutes, date: trip.day }))];
     end();
     close();
@@ -296,8 +308,8 @@ function openTripReview() {
     h('h2', null, 'Save these times?'),
     h('p', { class: 'hint' }, 'Correct anything that was off, and untick a time if the day was unusual, like a late train.'),
     h('ul', { class: 'lap-list' }, rows.map(r => h('li', null,
-      h('label', { class: 'check grow' }, h('input', { type: 'checkbox', checked: true, onchange: e => { r.keep = e.target.checked; } }), h('bdi', null, legLabel(r.leg))),
-      h('label', { class: 'leg-min' }, h('input', { type: 'number', min: 1, max: 600, value: r.minutes, 'aria-label': `Minutes for ${legLabel(r.leg)}`, oninput: e => { r.minutes = Math.round(+e.target.value) || 0; } }), h('span', { class: 'hint' }, 'min'))))),
+      h('label', { class: 'check grow' }, h('input', { type: 'checkbox', checked: true, onchange: e => { r.keep = e.target.checked; } }), h('bdi', null, label(r))),
+      h('label', { class: 'leg-min' }, h('input', { type: 'number', min: r.wait ? 0 : 1, max: 600, value: r.minutes, 'aria-label': `Minutes for ${label(r)}`, oninput: e => { r.minutes = Math.round(+e.target.value) || 0; } }), h('span', { class: 'hint' }, 'min'))))),
     h('div', { class: 'row end' },
       h('button', { type: 'button', class: 'btn ghost', onclick: () => { end(); close(); persist('trip'); toast('Discarded the trip'); } }, 'Discard'),
       h('button', { class: 'btn primary' }, 'Save times'))));
@@ -311,6 +323,9 @@ export function tripBar() {
   const leg = route.legs[trip.index];
   const waiting = isTransit(leg) && !trip.boarded;
   const total = route.legs.length;
+  // Tapped on reaching the stop, so the walk ends there and the wait starts.
+  const next = route.legs[trip.index + 1];
+  const doneLabel = trip.index + 1 === total ? 'Finish' : next.kind === 'bus' ? 'At the stop' : next.kind === 'train' ? 'At the station' : 'Next step';
   return h('section', { class: 'trip-bar', 'aria-label': 'Trip timer' },
     h('div', { class: 'trip-info' },
       h('span', { class: 'eyebrow' }, `Step ${trip.index + 1} of ${total}: `, h('bdi', null, route.name)),
@@ -318,8 +333,8 @@ export function tripBar() {
     h('span', { class: 'trip-clock', 'data-since': trip.stepStart, role: 'timer' }, clock(Date.now() - trip.stepStart)),
     h('div', { class: 'trip-actions' },
       waiting
-        ? h('button', { class: 'btn primary', onclick: () => { trip.boarded = true; trip.stepStart = Date.now(); persist('trip'); } }, 'I boarded')
-        : h('button', { class: 'btn primary', onclick: () => nextStep() }, trip.index + 1 === total ? 'Finish' : 'Next step'),
+        ? h('button', { class: 'btn primary', onclick: boarded }, 'I boarded')
+        : h('button', { class: 'btn primary', onclick: () => nextStep() }, doneLabel),
       leg.optional || waiting ? h('button', { class: 'btn ghost', onclick: () => nextStep(true) }, 'Skip') : null,
       h('button', { class: 'btn ghost', onclick: async () => {
         if (await confirmDialog({ title: 'Cancel this trip?', body: 'Times from this trip are not saved.', action: 'Cancel trip', danger: true })) { state.trip = null; persist('trip'); }

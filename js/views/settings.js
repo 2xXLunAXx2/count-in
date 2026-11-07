@@ -76,7 +76,8 @@ function googleCard() {
       h('li', null, 'Under ', h('a', { href: 'https://console.cloud.google.com/auth/clients', target: '_blank', rel: 'noopener' }, 'Clients'), ', create a Web application client and add this as an authorized JavaScript origin: ', h('code', null, origin)),
       h('li', null, 'Paste the client ID here and connect. Google warns that the app is unverified, which is expected for an app you made yourself.')),
     h('div', { class: 'row gap' }, input, h('button', { class: 'btn primary', onclick: () => {
-      const id = input.value.trim();
+      // Phones sometimes turn a pasted ID into a link, adding http:// in front.
+      const id = input.value.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
       if (!id.endsWith('.apps.googleusercontent.com')) { toast('That does not look like a client ID. It ends in .apps.googleusercontent.com.', { error: true }); return; }
       connect(id);
     } }, 'Connect')));
