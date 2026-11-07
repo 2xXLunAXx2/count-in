@@ -36,7 +36,7 @@ export const isKnownPlace = name => placeNames().some(n => norm(n) === norm(name
 export function routerFor(dayMs) {
   const net = network(), transfer = +state.settings.transfer || 4;
   return makeRouter({
-    routes: state.myRoutes, samples: state.legSamples, choices: state.routeChoices, dayKey: ymd(dayMs), weekday: new Date(dayMs).getDay(), knows: isKnownPlace,
+    routes: state.myRoutes, lines: state.lines, samples: state.legSamples, choices: state.routeChoices, dayKey: ymd(dayMs), weekday: new Date(dayMs).getDay(), knows: isKnownPlace,
     fallback: {
       arriveBy: (from, to, deadline) => { try { return planArrival(net, { from, to, dateMs: dayMs, arriveBy: deadline, transfer, options: 2 })[0] || null; } catch { return null; } },
       departAfter: (from, to, after) => { try { return planDeparture(net, { from, to, dateMs: dayMs, departAfter: after, transfer }); } catch { return null; } },

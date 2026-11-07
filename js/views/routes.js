@@ -57,9 +57,10 @@ export function legRow(l, next, transfer, dateMs) {
       h('li', { class: `leg ${l.type === 'ride' ? l.mode : l.type}` },
         h('span', { class: 'leg-time' }, fmtClock(l.dep)),
         h('div', { class: 'leg-body' },
-          h('p', null, h('bdi', null, l.label), ` · ${l.min} min`),
-          h('p', { class: 'hint' }, l.logged ? `Your average of ${l.logged} · ` : 'Your estimate · ',
-            h('button', { type: 'button', class: 'link', onclick: () => openLegLog(l.legId, l.label, dateMs) }, 'Log a time')))),
+          h('p', null, h('bdi', null, l.label), l.service ? [' (', h('bdi', null, l.service), ')'] : null, ` · ${l.min} min`),
+          l.onLine ? h('p', { class: 'hint' }, 'From ', h('bdi', null, l.from), ', off at ', h('bdi', null, l.to), ` at ${fmtClock(l.arr)}`) : null,
+          h('p', { class: 'hint' }, l.onLine ? (l.logged ? `Timetable, adjusted by ${l.logged} timed ride${l.logged === 1 ? '' : 's'} · ` : 'Timetable · ') : l.logged ? `Your average of ${l.logged} · ` : 'Your estimate · ',
+            h('button', { type: 'button', class: 'link', onclick: () => openLegLog(l.legId, l.label, dateMs, l.planned, l.choices) }, 'Log a time')))),
       gap > 0 ? h('li', { class: 'leg-gap' }, `${gap} min wait`) : null,
     ];
   }

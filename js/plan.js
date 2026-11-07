@@ -72,7 +72,8 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
         items.push({ kind: 'noRoute', from: cur, to: place, start, end: start });
       }
     }
-    items.push({ kind: BREAK_TITLE.test(ev.summary || '') ? 'plannedBreak' : 'event', ev, start, end, nested, unresolved: unresolved || null });
+    // `from` is where you are before it, for adding travel to an event with no place yet.
+    items.push({ kind: BREAK_TITLE.test(ev.summary || '') ? 'plannedBreak' : 'event', ev, start, end, nested, unresolved: unresolved || null, from: cur, placed: !!place });
     if (place) { cur = place; pinnedUntil = Math.max(pinnedUntil ?? end, end); }
     busyUntil = Math.max(busyUntil ?? end, end);
   }

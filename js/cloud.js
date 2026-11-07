@@ -4,7 +4,7 @@ import { state, save, emit, onSave } from './store.js';
 import { google, drive, NeedsSignIn, NeedsScope } from './google.js';
 
 const FILE = 'count-in-sync.json';
-const KEYS = ['categories', 'appliedRules', 'places', 'myRoutes', 'legSamples', 'routeChoices', 'trip', 'route'];
+const KEYS = ['categories', 'appliedRules', 'places', 'myRoutes', 'lines', 'legSamples', 'routeChoices', 'trip', 'route'];
 // Settings that describe your life rather than this screen. Theme and filters stay per device.
 const SETTINGS = ['home', 'placeAliases', 'routeVersions', 'importedRoutes', 'skippedOps', 'quiet', 'transfer', 'placesAdded', 'doctorsAdded'];
 // Merged field by field, so a change made on each device survives.
@@ -49,7 +49,7 @@ function mergeList(base, local, remote) {
 
 const pickSettings = s => Object.fromEntries(SETTINGS.filter(k => k in s).map(k => [k, s[k]]));
 const snapshot = () => clone({ ...Object.fromEntries(KEYS.map(k => [k, state[k]])), settings: pickSettings(state.settings) });
-const hasData = d => !!(d?.myRoutes?.length || d?.legSamples?.length);
+const hasData = d => !!(d?.myRoutes?.length || d?.lines?.length || d?.legSamples?.length);
 const current = k => (k === 'settings' ? pickSettings(state.settings) : state[k]);
 
 // The first time a device syncs there is nothing to compare with. A device with

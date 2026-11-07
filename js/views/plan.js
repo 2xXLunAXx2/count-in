@@ -1,6 +1,6 @@
 // The Plan page: one day from leaving home to getting back, with travel and breaks.
 import { state, save, emit } from '../store.js';
-import { h, addDays, startOfDay, fmt, fmtTime, fmtClock, norm, inkOn, sameDay, MIN } from '../util.js';
+import { h, addDays, startOfDay, fmt, fmtTime, fmtClock, norm, inkOn, sameDay, ymd, MIN } from '../util.js';
 import { calById, catOf, colorOf, visibleEvents, network, placeNames, isKnownPlace, routerFor } from '../core.js';
 import { buildDayPlan } from '../plan.js';
 import { matchPlace } from '../transit.js';
@@ -13,8 +13,11 @@ import { toast, icon } from '../ui.js';
 
 export const homePlace = () => state.settings.home || state.route.from || '';
 
-// A location on the event wins, then the event's exact title, then its category.
+// A one-time route made for the event wins, then a location on the event, then the event's
+// exact title, then its category.
 function resolvePlace(ev) {
+  const bound = state.myRoutes.find(r => r.day && r.forEvent === ev.id);
+  if (bound) return { place: bound.to };
   const net = network();
   const cat = catOf(ev);
   if (ev.location) {
@@ -75,6 +78,9 @@ function row(i, time, body, cls = '') {
   return h('li', { class: `tl-row ${cls}` }, h('span', { class: 'tl-time' }, time), h('div', { class: 'tl-body' }, body));
 }
 
+// A trip for one day only, tied to this event, so it needs no place of its own.
+const addOneTime = i => openRouteEditor(null, { from: i.from, to: i.ev.location || '', day: ymd(i.start), oneTime: true, forEvent: i.ev.id });
+
 function eventRow(i) {
   const color = colorOf(i.ev);
   return row(i, fmtTime(i.start), [
@@ -86,6 +92,7 @@ function eventRow(i) {
     },
       h('label', { class: 'hint' }, 'To plan travel, choose the stop for ', h('bdi', null, i.unresolved), ':'),
       h('div', { class: 'row gap' }, h('input', { name: 'stop', list: 'plan-places', dir: 'auto', 'aria-label': `Stop for ${i.unresolved}`, placeholder: 'Stop or place' }), h('button', { class: 'btn ghost' }, 'Use stop'))) : null,
+    !i.placed && !i.nested && i.from ? h('button', { type: 'button', class: 'link tl-add-travel', onclick: () => addOneTime(i) }, i.unresolved ? 'Or add a one-time route there' : 'Add travel to this') : null,
   ], i.nested ? 'nested' : '');
 }
 
@@ -141,7 +148,10 @@ function renderItem(i, dayMs) {
     case 'noRoute': return row(i, fmtTime(i.start), h('div', { class: 'tl-travel missing' },
       h('p', { class: 'tl-warn' }, 'No route fits: ', h('bdi', null, i.from), ' to ', h('bdi', null, i.to), '.'),
       h('p', { class: 'hint' }, state.myRoutes.some(r => norm(r.from) === norm(i.from) && norm(r.to) === norm(i.to)) ? 'Your routes between these places have no departure in time.' : 'Travel time is missing until you add this route.'),
-      h('button', { type: 'button', class: 'btn ghost', onclick: () => openRouteEditor(null, { from: i.from, to: i.to }) }, 'Add this route')), 'travel');
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => openRouteEditor(null, {
+        // One-time unless both ends are places you go to regularly.
+        from: i.from, to: i.to, day: ymd(dayMs), oneTime: ![i.from, i.to].every(n => state.places.some(p => norm(p.name) === norm(n))),
+      }) }, 'Add this route')), 'travel');
     case 'break': return row(i, fmtTime(i.start), h('button', {
       class: 'tl-break', 'aria-label': `Add an event during this ${dur(span(i))} break`, onclick: () => openNewEvent(i.start, Math.min(i.end, i.start + 60 * MIN)),
     }, h('span', null, `Break · ${dur(span(i))}`), h('span', { class: 'tl-break-until' }, `until ${fmtTime(i.end)}`)), 'break');

@@ -16,13 +16,13 @@ const tx = async (mode, fn) => {
   });
 };
 
-const PERSISTED = ['mode', 'settings', 'calendars', 'events', 'categories', 'appliedRules', 'history', 'feeds', 'demo', 'route', 'walkLog', 'places', 'myRoutes', 'legSamples', 'routeChoices', 'trip', 'cloudBase'];
+const PERSISTED = ['mode', 'settings', 'calendars', 'events', 'categories', 'appliedRules', 'history', 'feeds', 'demo', 'route', 'walkLog', 'places', 'myRoutes', 'lines', 'legSamples', 'routeChoices', 'trip', 'cloudBase'];
 
 export const state = {
   mode: 'demo',
   settings: { clientId: '', weekStart: 0, theme: 'auto', quiet: { on: false, from: '22:30', to: '06:00', mode: 'earlier' }, hiddenCats: [], hiddenCals: [], transfer: 4, home: '', placeAliases: {}, skippedOps: {} },
   calendars: [], events: [], categories: [], appliedRules: null, history: [], feeds: [], demo: null, walkLog: [],
-  places: [], myRoutes: [], legSamples: [], routeChoices: {}, trip: null,
+  places: [], myRoutes: [], lines: [], legSamples: [], routeChoices: {}, trip: null,
   route: { from: '', to: '', date: '', time: '', early: 5 },
   view: { page: 'calendar', cal: 'week', anchor: Date.now(), planDay: null },
   sync: { status: 'idle', at: 0, error: '' },

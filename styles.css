@@ -250,6 +250,20 @@ textarea { resize: vertical; }
 .leg-min { display: inline-flex; align-items: center; gap: 5px; }
 .leg-min input { width: 66px; }
 .add-leg { align-self: flex-start; }
+.leg-alts { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.leg-alt { display: flex; flex-direction: column; gap: 6px; align-self: stretch; border-inline-start: 3px solid var(--line); padding-inline-start: 8px; }
+.leg-alt-top { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
+.leg-alt-top .icon-btn { width: 30px; height: 34px; }
+.lap-list .ride-pick { min-width: 0; }
+.line-list { display: flex; flex-direction: column; gap: 8px; }
+.line-grid { display: grid; grid-template-columns: minmax(120px, 1fr) repeat(var(--cols, 1), 76px) auto; gap: 6px; align-items: center; margin: 4px 0 8px; }
+.line-grid .row { gap: 2px; }
+.line-grid .icon-btn { width: 30px; height: 34px; }
+.line-grid input { min-width: 0; }
+.line-times { display: flex; flex-direction: column; gap: 10px; }
+.service-times { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.service-times legend { font-weight: 600; padding: 0 4px; }
+.service-times .btn { align-self: flex-start; }
 .lap-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
 .advanced { border-top: 1px solid var(--line); padding-top: 12px; }
 .advanced > summary { cursor: pointer; font-weight: 600; color: var(--muted); }
@@ -269,6 +283,12 @@ textarea { resize: vertical; }
   .leg-edit-top { grid-template-columns: minmax(0, 1fr) auto auto auto; }
   .leg-edit-top > input { grid-column: 1 / -1; grid-row: 2; }
   .leg-min { grid-column: 1 / -1; grid-row: 3; }
+  .leg-min:empty { display: none; }
+  .leg-alt-top .leg-min { grid-column: auto; grid-row: auto; }
+  /* Each station's name gets the full width, with its minutes underneath. */
+  .line-grid { grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr)) auto; }
+  .line-grid > .field-label { display: none; }
+  .line-grid > input[dir] { grid-column: 1 / -1; margin-top: 8px; }
   .trip-clock { font-size: 34px; }
   .trip-actions .btn { min-height: 46px; flex: 1; }
 }
