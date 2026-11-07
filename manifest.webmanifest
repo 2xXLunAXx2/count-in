@@ -1,0 +1,10 @@
+{
+  "name": "Count-in",
+  "short_name": "Count-in",
+  "description": "Your calendar, with control over every notification and color.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#eff1f7",
+  "theme_color": "#4a33e8",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
