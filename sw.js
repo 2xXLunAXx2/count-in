@@ -6,7 +6,8 @@ self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (e.request.method !== 'GET' || url.origin !== location.origin) return;
+  // Timetables from the computer's helper are never kept, so an old answer never looks current.
+  if (e.request.method !== 'GET' || url.origin !== location.origin || url.pathname.startsWith('/feed/')) return;
   e.respondWith(
     fetch(e.request)
       .then(res => {

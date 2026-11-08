@@ -1,11 +1,17 @@
 // Pure logic for the day plan: events, the travel between them, breaks, and the trip home.
 import { planArrival, planDeparture } from './transit.js';
-import { addDays, norm, MIN } from './util.js';
+import { addDays, norm, MIN, parseClock, startOfDay } from './util.js';
 
 const MIN_BREAK = 15;
 const BREAK_TITLE = /\b(break|lunch|coffee)\b|הפסקה|ארוחת/i;
 
 const same = (a, b) => norm(a) === norm(b);
+// Your own times for an event, when you need to be there earlier than it starts or leave later
+// than it ends, like a rehearsal. Clock times on the event's day, saved on the event.
+const ownTime = (ev, key) => {
+  const m = parseClock(ev.ext?.[key] || '');
+  return m == null ? null : startOfDay(ev.startMs) + m * MIN;
+};
 
 // `resolve(ev)` returns { place, unresolved }. `ev.optional` marks events that do not
 // commit you to being anywhere, such as reminders and subscribed calendars.
@@ -52,9 +58,11 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
       continue;
     }
     const { place, unresolved } = nested ? {} : resolve(ev);
+    // Being there by your own time replaces the arrive-early margin.
+    const arriveAt = nested ? null : ownTime(ev, 'arrive'), leaveAt = nested ? null : ownTime(ev, 'leave');
     if (place && cur && !same(place, cur)) {
-      const startMin = toMin(start), busyMin = pinnedUntil == null ? null : toMin(pinnedUntil);
-      let journey = arriveBy(cur, place, startMin - early, startMin);
+      const startMin = toMin(arriveAt ?? start), busyMin = pinnedUntil == null ? null : toMin(pinnedUntil);
+      let journey = arriveBy(cur, place, startMin - (arriveAt == null ? early : 0), startMin);
       let late = 0, leaveEarly = 0;
       if (!journey || (busyMin != null && journey.depart < busyMin)) {
         // With nothing earlier in the day this searches from midnight, which is why setting
@@ -73,9 +81,12 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
       }
     }
     // `from` is where you are before it, for adding travel to an event with no place yet.
-    items.push({ kind: BREAK_TITLE.test(ev.summary || '') ? 'plannedBreak' : 'event', ev, start, end, nested, unresolved: unresolved || null, from: cur, placed: !!place });
-    if (place) { cur = place; pinnedUntil = Math.max(pinnedUntil ?? end, end); }
-    busyUntil = Math.max(busyUntil ?? end, end);
+    // `stay` is the time you are there, from arriving to leaving, which is never a break.
+    const until = leaveAt ?? end;
+    items.push({ kind: BREAK_TITLE.test(ev.summary || '') ? 'plannedBreak' : 'event', ev, start, end, nested, unresolved: unresolved || null, from: cur, placed: !!place,
+      ...(arriveAt != null || leaveAt != null ? { arriveAt, leaveAt, stay: [Math.min(start, arriveAt ?? start), until] } : {}) });
+    if (place) { cur = place; pinnedUntil = Math.max(pinnedUntil ?? until, until); }
+    busyUntil = Math.max(busyUntil ?? until, until);
   }
 
   let homeAt = null;
@@ -97,9 +108,10 @@ export function buildDayPlan({ events, dayMs, home, net, router, resolve, early 
   const blocks = items.filter(i => i.kind !== 'optional' && i.kind !== 'noRoute').sort((a, b) => a.start - b.start);
   let cover = null;
   const breaks = [];
-  for (const b of blocks) {
-    if (cover != null && b.start - cover >= MIN_BREAK * MIN) breaks.push({ kind: 'break', start: cover, end: b.start });
-    cover = Math.max(cover ?? b.end, b.end);
+  for (const b of [...blocks].sort((x, y) => (x.stay?.[0] ?? x.start) - (y.stay?.[0] ?? y.start))) {
+    const [from, to] = b.stay || [b.start, b.end];
+    if (cover != null && from - cover >= MIN_BREAK * MIN) breaks.push({ kind: 'break', start: cover, end: from });
+    cover = Math.max(cover ?? to, to);
   }
   items.push(...breaks);
   const order = { break: 0, travel: 1, savedTravel: 1, noRoute: 1, event: 2, plannedBreak: 2, optional: 3 };

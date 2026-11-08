@@ -29,6 +29,7 @@ function openPanel(ev) {
     colorId: ev.colorId, customColor: ev.ext?.color || null, catId: ev.ext?.cat || '',
     manual: !!ev.ext?.manual, minutes: currentMinutes(ev, cal), scope: 'one',
     googlePicked: false, repeat: '', until: '',
+    arrive: ev.ext?.arrive || '', leave: ev.ext?.leave || '',
   };
   const cat = catOf(ev);
   let close;
@@ -122,7 +123,10 @@ function openPanel(ev) {
     if (!form.allDay && parseClock(form.end) == null) return showError('Enter an end time.');
     if (endMs <= startMs) return showError('The event has to end after it starts.');
     if (form.repeat && form.until && form.until < form.date) return showError('The last day it repeats has to be on or after the first.');
-    const ext = privateChanges(ev, { countinColor: form.customColor, countinManual: form.manual ? '1' : null, countinCat: form.catId });
+    if (form.allDay) { form.arrive = ''; form.leave = ''; }
+    if (form.arrive && parseClock(form.arrive) >= parseClock(form.end)) return showError('"Be there by" has to be before the event ends.');
+    if (form.leave && parseClock(form.leave) <= parseClock(form.start)) return showError('"Leave at" has to be after the event starts.');
+    const ext = privateChanges(ev, { countinColor: form.customColor, countinManual: form.manual ? '1' : null, countinCat: form.catId, countinArrive: form.arrive, countinLeave: form.leave });
     // A Google color you picked stays. Otherwise a category chosen here brings its color.
     if (!form.googlePicked) {
       const chosen = state.categories.find(c => c.id === form.catId);
@@ -192,6 +196,12 @@ function openPanel(ev) {
     ev.isNew ? h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Repeats'), repeatBox) : null,
     field('Where', h('input', { dir: 'auto', list: 'event-places', autocomplete: 'off', value: form.location, placeholder: 'Add a place', disabled: !canEditDetails, oninput: e => { form.location = e.target.value; } })),
     h('datalist', { id: 'event-places' }, state.places.map(p => h('option', { value: p.name }))),
+    // Saved on the event, so they reach your phone, and a whole series can share them.
+    editable && !ev.allDay ? h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'For Day plan'),
+      h('div', { class: 'own-times-grid' },
+        field('Be there by', h('input', { type: 'time', class: 'arrive-by', value: form.arrive, oninput: e => { form.arrive = e.target.value; } })),
+        field('Leave at', h('input', { type: 'time', class: 'leave-at', value: form.leave, oninput: e => { form.leave = e.target.value; } }))),
+      h('span', { class: 'field-hint' }, 'Travel there aims for this time instead of the start, and home begins when you leave. Empty uses the event\'s own times.')) : null,
     ev.isNew && state.calendars.filter(writable).length > 1 ? field('Calendar', h('select', { onchange: e => { form.calId = e.target.value; } }, state.calendars.filter(writable).map(c => h('option', { value: c.id, selected: c.id === form.calId }, c.summary)))) : null,
     editable && state.categories.length ? field('Category', h('select', { onchange: e => { form.catId = e.target.value; } },
       h('option', { value: '' }, ev.isNew || !cat ? 'Automatic' : `Automatic (${cat.name})`),

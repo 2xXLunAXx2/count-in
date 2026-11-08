@@ -6,7 +6,7 @@ import { renderCalendar } from './views/calendar.js';
 import { renderAlerts } from './views/alerts.js';
 import { renderRoutes, ensureSampleFeed } from './views/routes.js';
 import { renderPlan } from './views/plan.js';
-import { tripBar, ensureStarterPlaces, loadPreparedRoutes } from './views/myroutes.js';
+import { tripBar, ensureStarterPlaces, loadPreparedRoutes, syncTimetable } from './views/myroutes.js';
 import { renderSettings, renewSession } from './views/settings.js';
 import { loadGis, sessionEndingSoon } from './google.js';
 import { cloudSync } from './cloud.js';
@@ -146,6 +146,8 @@ async function start() {
   subscribe(render);
   render();
   loadPreparedRoutes();
+  // On the computer, the helper's timetable keeps steps current; the phone has no helper.
+  if (isLocal()) { syncTimetable(); setInterval(() => { if (!document.hidden) syncTimetable(); }, 10 * 60000); }
   checkServer();
   setInterval(checkServer, 60000);
   window.addEventListener('hashchange', () => { const p = location.hash.slice(1); if (PAGES.some(x => x[0] === p) && p !== state.view.page) go(p); });

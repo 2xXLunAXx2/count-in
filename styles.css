@@ -191,6 +191,8 @@ textarea { resize: vertical; }
 .tl-event:hover { filter: brightness(1.06); }
 .tl-event-title { font-weight: 700; font-size: 15.5px; }
 .tl-event-meta { font-size: 13px; opacity: .9; }
+.own-times-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.own-times-grid input { width: 100%; min-width: 0; }
 .tl-fix { display: flex; flex-direction: column; gap: 5px; padding: 8px 2px 4px; }
 .tl-travel { width: 100%; text-align: start; display: flex; flex-direction: column; gap: 7px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .tl-travel.missing { border-color: var(--ping); border-style: dashed; }
@@ -255,6 +257,17 @@ textarea { resize: vertical; }
 .leg-alt-top { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
 .leg-alt-top .icon-btn { width: 30px; height: 34px; }
 .lap-list .ride-pick { min-width: 0; }
+.leg-edit .fill-feed, .leg-feed .unlink-feed { align-self: flex-start; }
+.leg-feed { display: flex; flex-direction: column; gap: 4px; }
+.feed-lines { margin: 0; padding-inline-start: 18px; }
+.feed-picker { overflow-y: auto; }
+.stop-picker { position: relative; }
+.stop-results { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; }
+.stop-results:empty { display: none; }
+.stop-hit { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; text-align: start; padding: 7px 10px; border: 0; border-bottom: 1px solid var(--line); background: none; color: inherit; font: inherit; cursor: pointer; }
+.stop-hit:hover, .stop-hit:focus-visible { background: var(--bg); }
+.feed-found { display: flex; flex-direction: column; gap: 6px; }
+.find-lines { align-self: flex-start; }
 .line-list { display: flex; flex-direction: column; gap: 8px; }
 .line-grid { display: grid; grid-template-columns: minmax(120px, 1fr) repeat(var(--cols, 1), 76px) auto; gap: 6px; align-items: center; margin: 4px 0 8px; }
 .line-grid .row { gap: 2px; }

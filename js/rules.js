@@ -285,7 +285,8 @@ export const markOp = (ev, colorId) => ({
 // The app's private fields on an event, limited to what changed. Google rejects empty values
 // for fields an event does not have, so clearing is only sent for ones that exist.
 export function privateChanges(ev, want) {
-  const have = { countinColor: ev.ext?.color || null, countinManual: ev.ext?.manual ? '1' : null, countinCat: ev.ext?.cat || null };
+  const have = { countinColor: ev.ext?.color || null, countinManual: ev.ext?.manual ? '1' : null, countinCat: ev.ext?.cat || null,
+    countinArrive: ev.ext?.arrive || null, countinLeave: ev.ext?.leave || null };
   const out = {};
   for (const [k, v] of Object.entries(want)) if ((v || null) !== have[k]) out[k] = v || null;
   return Object.keys(out).length ? { extendedProperties: { private: out } } : {};

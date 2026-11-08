@@ -24,7 +24,9 @@ export function normalizeEvent(raw, calId) {
     id: raw.id, calId, etag: raw.etag, summary: raw.summary || '', description: raw.description || '', location: raw.location || '',
     colorId: raw.colorId || null, allDay, startMs, endMs, recurringEventId: raw.recurringEventId || null,
     useDefault: raw.reminders ? !!raw.reminders.useDefault : true, overrides: raw.reminders?.overrides || [],
-    ext: { color: priv.countinColor || null, manual: priv.countinManual === '1', ...(priv.countinTravelTo ? { travelTo: priv.countinTravelTo } : {}), ...(priv.countinCat ? { cat: priv.countinCat } : {}) },
+    ext: { color: priv.countinColor || null, manual: priv.countinManual === '1', ...(priv.countinTravelTo ? { travelTo: priv.countinTravelTo } : {}), ...(priv.countinCat ? { cat: priv.countinCat } : {}),
+      // When you need to be there and when you leave, if not the event's own times ("18:45").
+      ...(priv.countinArrive ? { arrive: priv.countinArrive } : {}), ...(priv.countinLeave ? { leave: priv.countinLeave } : {}) },
     free: raw.transparency === 'transparent',
     // An invitation you have not said yes to. "Maybe" still counts as going.
     notAccepted: ['needsAction', 'declined'].includes((raw.attendees || []).find(a => a.self)?.responseStatus),

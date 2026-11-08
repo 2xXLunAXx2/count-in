@@ -2,8 +2,9 @@
 import { state, save, emit } from '../store.js';
 import { h, uid, norm, ymd, parseYmd, fmt, pad } from '../util.js';
 import { placeNames } from '../core.js';
-import { LEG_KINDS, isTransit, waitId, hasAlts, legOptions, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom, lineRides, plannedRide, withLines } from '../myroutes.js';
+import { LEG_KINDS, isTransit, waitId, hasAlts, legOptions, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom, lineRides, timetabledRide, withLines, missingTimes } from '../myroutes.js';
 import { dialog, toast, icon, confirmDialog } from '../ui.js';
+import { feedStatus, searchStops, findLines, feedResults, watchPairs, applyResults, fillOption, lineLabel, lineSummary, pairKey, fedOptions } from '../feed.js';
 
 const persist = (...keys) => { save(...keys); emit(); };
 const sampleDay = () => ymd(Date.now());
@@ -169,6 +170,141 @@ export function openLineEditor(existing) {
       h('button', { class: 'btn primary' }, existing ? 'Save line' : 'Add line'))), { className: 'wide-dialog' });
 }
 
+/* ---------- Official timetable ---------- */
+const feedSummary = trips => lineSummary({ trips });
+const stopName = s => s.en || s.name;
+
+// Where a line with stops of its own lets you off, since it differs from the step.
+const offAt = (o, l) => (o.feed && l.feed && o.feed.to.key !== l.feed.to.key ? [', off at ', h('bdi', null, o.feed.to.name)] : null);
+
+// Back to times written by hand, keeping each line and its rough minutes.
+function unlinkFeed(l) {
+  for (const o of [l, ...(l.alts || [])]) { delete o.feedLine; delete o.trips; delete o.feedDate; delete o.feed; }
+}
+
+// Rereads the timetable on the computer: tells the helper which stops your steps use, and
+// fills in what it has. The phone has no helper and keeps what Drive brings.
+export async function syncTimetable() {
+  const s = await feedStatus();
+  if (JSON.stringify(s) !== JSON.stringify(state.view.feed ?? null)) { state.view.feed = s; emit(); }
+  if (!s) return;
+  try {
+    await watchPairs(state.myRoutes);
+    const results = await feedResults();
+    const changed = applyResults(state.myRoutes, results);
+    if (changed) { state.myRoutes = [...state.myRoutes]; persist('myRoutes'); }
+    // Stops new to the helper are read in the background, so look again shortly.
+    const waiting = state.myRoutes.some(r => r.legs.some(l => fedOptions(l).some(({ feed }) => !results.pairs?.[pairKey(feed)])));
+    if (waiting && !syncTimetable.soon) syncTimetable.soon = setTimeout(() => { syncTimetable.soon = null; syncTimetable(); }, 30000);
+  } catch { /* the helper is busy or stopped; the next check tries again */ }
+}
+
+// What to do about steps whose times have not arrived, which depends on where you are.
+export function missingTimesHelp() {
+  if (state.view.feed) return 'Count-in is reading them now, which takes up to a minute.';
+  if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) return 'The Count-in window on this computer is an older version without the timetable. Close it and double-click start.bat to start it again.';
+  return 'They come from Count-in on your computer, so start it there with start.bat, and Drive brings them here.';
+}
+
+function feedStatusText() {
+  const missing = missingTimes(state.myRoutes);
+  if (missing) return `${missing === 1 ? 'One bus or train has' : `${missing} buses and trains have`} no departure times yet, so their times are guesses. ${missingTimesHelp()}`;
+  const s = state.view.feed;
+  if (!s) return null;
+  if (s.message) return s.message;
+  return s.updated ? `Official timetable from ${fmt(new Date(s.updated), { day: 'numeric', month: 'short' })}, refreshed daily while Count-in runs here.` : null;
+}
+
+// One stop, found by name or by the code on its sign.
+function stopPicker(label, chosen, onPick) {
+  const results = h('ul', { class: 'stop-results' });
+  const input = h('input', { type: 'search', dir: 'auto', class: 'stop-search', placeholder: 'Name or code on the sign', value: chosen ? stopName(chosen) : '', 'aria-label': label });
+  let timer = 0;
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    onPick(null);
+    timer = setTimeout(async () => {
+      const q = input.value.trim();
+      if (q.length < 2) { results.replaceChildren(); return; }
+      let found = [];
+      try { found = await searchStops(q); } catch (x) { results.replaceChildren(h('li', { class: 'hint' }, x.message)); return; }
+      if (input.value.trim() !== q) return;
+      results.replaceChildren(...(found.length ? found.map(s => h('li', null, h('button', { type: 'button', class: 'stop-hit', onclick: () => {
+        input.value = stopName(s);
+        results.replaceChildren();
+        onPick(s);
+      } }, h('bdi', null, stopName(s)), h('span', { class: 'hint' }, [s.en ? h('bdi', null, s.name) : null, s.station ? 'Train station' : s.cityEn || s.city ? h('bdi', null, s.cityEn || s.city) : null, s.codes.length ? s.codes.join(', ') : null].filter(Boolean).flatMap((x, i) => (i ? [' · ', x] : [x])))))) : [h('li', { class: 'hint' }, 'No stop by that name.')]));
+    }, 250);
+  });
+  return h('div', { class: 'field grow stop-picker' }, h('span', { class: 'field-label' }, label), input, results);
+}
+
+// Links a bus or train step to the official timetable: where you get on and off, and which
+// lines you take there. A line already on the step keeps its timed history.
+export function openFeedPicker(step, onDone) {
+  let from = step.feed?.from || null, to = step.feed?.to || null, found = null, updated = null;
+  const err = h('p', { class: 'form-error', role: 'alert', hidden: true });
+  const linesRoot = h('div', { class: 'feed-found' });
+  const findBtn = h('button', { type: 'button', class: 'btn ghost find-lines' }, 'Find lines');
+  // Ticked at first: the lines on the step already, by link or by name, like a Bus 69 you typed.
+  const ticked = new Set([step.feedLine, ...(step.alts || []).map(a => a.feedLine)].filter(Boolean));
+  const names = new Set(legOptions(step).map(legLabel));
+  const fail = msg => { err.textContent = msg; err.hidden = false; };
+  const drawLines = () => {
+    if (!found) { linesRoot.replaceChildren(); return; }
+    if (!found.length) { linesRoot.replaceChildren(h('p', { class: 'hint' }, 'No bus or train goes from the first stop to the second this week. Check the direction, or try the stop across the road.')); return; }
+    for (const l of found) if (names.has(lineLabel(l))) ticked.add(l.id);
+    names.clear();
+    if (!found.some(l => ticked.has(l.id))) ticked.add(found[0].id);
+    linesRoot.replaceChildren(h('span', { class: 'field-label' }, 'Lines you take here'),
+      ...found.map(l => h('label', { class: 'check' }, h('input', { type: 'checkbox', class: 'feed-line', value: l.id, checked: ticked.has(l.id), onchange: e => { (e.target.checked ? ticked.add(l.id) : ticked.delete(l.id)); } }),
+        h('bdi', null, lineLabel(l)), h('span', { class: 'hint' }, lineSummary(l)))));
+  };
+  findBtn.onclick = async () => {
+    err.hidden = true;
+    if (!from || !to) return fail('Choose both stops from the lists.');
+    findBtn.disabled = true;
+    linesRoot.replaceChildren(h('p', { class: 'hint' }, 'Reading the timetable. The first time for these stops takes up to half a minute.'));
+    try { const res = await findLines(from, to); found = res.lines; updated = res.updated; } catch (x) { found = null; linesRoot.replaceChildren(); fail(x.message); }
+    findBtn.disabled = false;
+    drawLines();
+  };
+  const pick = side => s => { if (side === 'from') from = s; else to = s; found = null; drawLines(); };
+  const use = () => {
+    const chosen = (found || []).filter(l => ticked.has(l.id));
+    if (!chosen.length) return fail('Find the lines, then tick the ones you take.');
+    // The line the step already is stays the step, so its history stays with it.
+    const current = step.feedLine || null;
+    chosen.sort((a, b) => (b.id === current || lineLabel(b) === step.label) - (a.id === current || lineLabel(a) === step.label));
+    const [main, ...others] = chosen;
+    const oldAlts = step.alts || [];
+    delete step.lineId; delete step.board; delete step.alight;
+    Object.assign(step, { kind: main.mode, label: lineLabel(main), feedLine: main.id, feed: { from: { key: from.key, name: stopName(from) }, to: { key: to.key, name: stopName(to) } } });
+    fillOption(step, main, updated);
+    // Lines with stops of their own were not among these, so they stay as they are.
+    const ownStops = oldAlts.filter(a => a.feed && !others.some(l => l.id === a.feedLine));
+    step.alts = [...others.map(l => {
+      const old = oldAlts.find(a => !a.feed && (a.feedLine === l.id || a.name === lineLabel(l)));
+      const alt = { id: old?.id || uid(), name: lineLabel(l), feedLine: l.id, minutes: old?.minutes ?? step.minutes, times: '' };
+      fillOption(alt, l, updated);
+      return alt;
+    }), ...ownStops];
+    if (!step.alts.length) delete step.alts;
+    close();
+    onDone();
+  };
+  const { close } = dialog(h('form', { class: 'review feed-picker', onsubmit: e => { e.preventDefault(); use(); }, novalidate: true },
+    h('header', { class: 'row between' }, h('h2', null, 'Official timetable'), h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Close', onclick: () => close(), html: icon('x') })),
+    h('p', { class: 'hint' }, 'Where you get on and off. Every bus and train between them is listed, and their times stay current each day.'),
+    stopPicker('Get on at', from, pick('from')),
+    stopPicker('Get off at', to, pick('to')),
+    findBtn, linesRoot, err,
+    h('div', { class: 'row end' },
+      h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'),
+      h('button', { class: 'btn primary' }, 'Use these lines'))), { className: 'wide-dialog' });
+  if (from && to) findBtn.click();
+}
+
 /* ---------- Route editor ---------- */
 const TIMES_HINT = 'Departures (optional)\nsun-thu: 07:12, 07:42\nfri: every 30 from 08:00 to 14:00';
 const STARTER_LEGS = () => [
@@ -221,26 +357,42 @@ export function openRouteEditor(existing, preset = {}) {
       draw();
     } }, 'Add another line for this step'),
     l.alts?.length ? h('p', { class: 'hint' }, 'The one that gets there first is planned. Timing a ride asks which one you took, and each keeps its own average.') : null);
+  // A step on the official timetable lists its lines; the timetable sets their times.
+  const feedBlock = l => h('div', { class: 'leg-feed' },
+    h('p', { class: 'hint' }, 'From ', h('bdi', null, l.feed.from.name), ' to ', h('bdi', null, l.feed.to.name), ', on the official timetable:'),
+    h('ul', { class: 'feed-lines' }, legOptions(l).map(o => h('li', null, h('bdi', null, legLabel(o)), offAt(o, l),
+      o.trips ? `, ${feedSummary(o.trips)}` : ', its times arrive with the next refresh'))),
+    h('div', { class: 'row gap wrap' },
+      state.view.feed ? h('button', { type: 'button', class: 'link fill-feed', onclick: () => openFeedPicker(l, draw) }, 'Change stops or lines') : null,
+      h('button', { type: 'button', class: 'link unlink-feed', onclick: () => { unlinkFeed(l); draw(); } }, 'Write the times myself instead')));
   const draw = () => {
     legsRoot.replaceChildren(...draft.legs.map((l, i) => {
       const line = isTransit(l) ? lineOf(l) : null;
+      const fed = !!l.feed && (l.kind === 'bus' || l.kind === 'train');
       return h('li', { class: 'leg-edit' },
         h('div', { class: 'leg-edit-top' },
-          h('select', { 'aria-label': 'Kind of step', onchange: e => { l.kind = e.target.value; if (lineOf(l)?.mode !== l.kind) { delete l.lineId; delete l.board; delete l.alight; } draw(); } },
+          h('select', { 'aria-label': 'Kind of step', onchange: e => {
+            l.kind = e.target.value;
+            if (lineOf(l)?.mode !== l.kind) { delete l.lineId; delete l.board; delete l.alight; }
+            if (l.feed && l.kind !== 'bus' && l.kind !== 'train') unlinkFeed(l);
+            draw();
+          } },
             Object.entries(LEG_KINDS).map(([k, name]) => h('option', { value: k, selected: l.kind === k }, name))),
           h('input', { dir: 'auto', value: l.label, placeholder: l.kind === 'stop' ? 'Store' : LEG_KINDS[l.kind], 'aria-label': 'What this step is', oninput: e => { l.label = e.target.value; } }),
-          line ? h('span', { class: 'leg-min' }) : h('label', { class: 'leg-min' }, h('input', { type: 'number', min: 0, max: 600, value: l.minutes, 'aria-label': 'Minutes', oninput: e => { l.minutes = Math.max(0, +e.target.value || 0); } }), h('span', { class: 'hint' }, 'min')),
+          line || fed ? h('span', { class: 'leg-min' }) : h('label', { class: 'leg-min' }, h('input', { type: 'number', min: 0, max: 600, value: l.minutes, 'aria-label': 'Minutes', oninput: e => { l.minutes = Math.max(0, +e.target.value || 0); } }), h('span', { class: 'hint' }, 'min')),
           h('button', { type: 'button', class: 'icon-btn', disabled: i === 0, 'aria-label': 'Move up', onclick: () => move(i, -1), html: '↑' }),
           h('button', { type: 'button', class: 'icon-btn', disabled: i === draft.legs.length - 1, 'aria-label': 'Move down', onclick: () => move(i, 1), html: '↓' }),
           h('button', { type: 'button', class: 'icon-btn', disabled: draft.legs.length === 1, 'aria-label': 'Remove step', onclick: () => { draft.legs.splice(i, 1); draw(); }, html: icon('x') })),
-        isTransit(l) && linesFor(l).length ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Line'),
-          h('select', { class: 'leg-line', onchange: e => setLine(l, e.target.value) },
-            h('option', { value: '' }, 'None, I will write the times here'),
-            linesFor(l).map(x => h('option', { value: x.id, selected: x.id === l.lineId }, x.name)))) : null,
-        line ? [h('div', { class: 'row gap wrap' }, stationPicker(l, 'board', 'Get on at'), stationPicker(l, 'alight', 'Get off at')),
-          h('p', { class: 'hint leg-line-ride' }, lineRideText(l), '. Times come from the line.')]
-          : isTransit(l) ? h('textarea', { dir: 'ltr', rows: 2, class: 'leg-times', value: l.times || '', placeholder: TIMES_HINT, 'aria-label': 'Departure times', oninput: e => { l.times = e.target.value; } }) : null,
-        l.kind === 'bus' || l.kind === 'train' ? altsEditor(l) : null,
+        fed ? feedBlock(l) : [
+          isTransit(l) && linesFor(l).length ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Line'),
+            h('select', { class: 'leg-line', onchange: e => setLine(l, e.target.value) },
+              h('option', { value: '' }, 'None, I will write the times here'),
+              linesFor(l).map(x => h('option', { value: x.id, selected: x.id === l.lineId }, x.name)))) : null,
+          line ? [h('div', { class: 'row gap wrap' }, stationPicker(l, 'board', 'Get on at'), stationPicker(l, 'alight', 'Get off at')),
+            h('p', { class: 'hint leg-line-ride' }, lineRideText(l), '. Times come from the line.')]
+            : isTransit(l) ? h('textarea', { dir: 'ltr', rows: 2, class: 'leg-times', value: l.times || '', placeholder: TIMES_HINT, 'aria-label': 'Departure times', oninput: e => { l.times = e.target.value; } }) : null,
+          l.kind === 'bus' || l.kind === 'train' ? altsEditor(l) : null,
+          (l.kind === 'bus' || l.kind === 'train') && state.view.feed ? h('button', { type: 'button', class: 'link fill-feed', onclick: () => openFeedPicker(l, draw) }, 'Fill from the official timetable') : null],
         h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!l.optional, onchange: e => { l.optional = e.target.checked; } }), 'Only sometimes, like going through the store'));
     }));
   };
@@ -357,7 +509,7 @@ function routeRow(stored, stats) {
   // Other lines on a step, each with its own average and departures.
   const altsText = l => (hasAlts(l) ? legOptions(l).slice(1).map(o => {
     const s = stats.get(o.id);
-    return h('div', { class: 'hint' }, 'or ', h('bdi', null, legLabel(o)), `, ${legMinutes(o, stats)} min`, s ? ` (average of ${s.count})` : '', scheduleText(o));
+    return h('div', { class: 'hint' }, 'or ', h('bdi', null, legLabel(o)), offAt(o, l), `, ${legMinutes(o, stats)} min`, s ? ` (average of ${s.count})` : '', scheduleText(o));
   }) : null);
   return h('li', { class: 'route-row' },
     h('div', { class: 'route-row-head' },
@@ -372,6 +524,7 @@ function routeRow(stored, stats) {
       const tail = [w ? `, after waiting ${w.avg} min on average` : '', l.optional ? ', only sometimes' : ''];
       if (l.line && l.board && l.alight) return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), h('bdi', null, lineStepText(l, stats)), ...tail, altsText(l));
       return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), `, ${legMinutes(l, stats)} min`, s ? ` (average of ${s.count})` : '',
+        l.feed ? [', from ', h('bdi', null, l.feed.from.name), ' to ', h('bdi', null, l.feed.to.name), ' on the official timetable'] : null,
         ...tail, isTransit(l) ? scheduleText(l) : '', l.lineId && !l.line ? ', its line was removed' : '', altsText(l));
     })),
     legHistory(route, stats),
@@ -398,7 +551,8 @@ function routeRow(stored, stats) {
 export async function loadPreparedRoutes() {
   try {
     const list = await (await fetch('data/my-routes.json', { cache: 'no-store' })).json();
-    state.view.prepared = list.filter(r => importedVersion(r.id) < (r.version || 1));
+    // A retired route was merged into another, so it is only offered for removal where you have it.
+    state.view.prepared = list.filter(r => importedVersion(r.id) < (r.version || 1) && (!r.retired || state.myRoutes.some(x => x.id === r.id)));
     if (state.view.prepared.length) emit();
   } catch { /* no prepared routes, or running from a saved copy */ }
 }
@@ -409,14 +563,18 @@ const importedVersion = id => state.settings.routeVersions?.[id] ?? ((state.sett
 function addPrepared() {
   const list = state.view.prepared || [];
   const ids = new Set(list.map(r => r.id));
-  state.myRoutes = [...state.myRoutes.filter(r => !ids.has(r.id)), ...list];
-  for (const r of list) for (const name of [r.from, r.to]) {
+  const gone = new Set(state.myRoutes.filter(r => list.some(x => x.retired && x.id === r.id)).flatMap(r => r.legs.flatMap(sampleIds)));
+  state.legSamples = state.legSamples.filter(s => !gone.has(s.legId));
+  const added = list.filter(r => !r.retired);
+  state.myRoutes = [...state.myRoutes.filter(r => !ids.has(r.id)), ...added];
+  for (const r of added) for (const name of [r.from, r.to]) {
     if (!state.places.some(p => norm(p.name) === norm(name))) state.places = [...state.places, { id: uid(), name, aliases: [] }];
   }
   state.settings.routeVersions = { ...state.settings.routeVersions, ...Object.fromEntries(list.map(r => [r.id, r.version || 1])) };
   state.view.prepared = [];
   save('settings');
-  persist('myRoutes', 'places');
+  persist('myRoutes', 'places', 'legSamples');
+  if (state.view.feed) syncTimetable();
   toast(`Updated your routes: ${list.length} ready`);
 }
 
@@ -427,7 +585,7 @@ function preparedCard() {
   return h('section', { class: 'card prepared' },
     h('div', { class: 'card-head' },
       h('div', null, h('h2', null, `${list.length} route${list.length === 1 ? '' : 's'} ready`),
-        h('ul', { class: 'prepared-list' }, list.map(r => h('li', { dir: 'auto' }, isUpdate(r) ? 'Update: ' : 'New: ', h('bdi', null, r.from), ' → ', h('bdi', null, r.to), ', ', h('bdi', null, r.name))))),
+        h('ul', { class: 'prepared-list' }, list.map(r => h('li', { dir: 'auto' }, r.retired ? 'Removed, now part of another: ' : isUpdate(r) ? 'Update: ' : 'New: ', h('bdi', null, r.from), ' → ', h('bdi', null, r.to), ', ', h('bdi', null, r.name))))),
       h('button', { class: 'btn primary', onclick: addPrepared }, 'Add to my routes')));
 }
 
@@ -444,7 +602,8 @@ export function myRoutesSection() {
     preparedCard(),
     h('section', { class: 'card' },
       h('div', { class: 'card-head' },
-        h('div', null, h('h2', null, 'Your routes'), h('p', { class: 'hint' }, 'The trips you really take. Day plan uses them for every journey in your day.')),
+        h('div', null, h('h2', null, 'Your routes'), h('p', { class: 'hint' }, 'The trips you really take. Day plan uses them for every journey in your day.'),
+          feedStatusText() ? h('p', { class: `${missingTimes(state.myRoutes) ? 'tl-warn' : 'hint'} feed-status` }, feedStatusText()) : null),
         h('button', { class: 'btn primary', onclick: () => openRouteEditor() }, 'New route')),
       groups.size ? [...groups.values()].map(g => h('div', { class: 'route-group' },
         h('div', { class: 'route-group-head' }, h('h3', { dir: 'auto' }, h('bdi', null, g.from), ' → ', h('bdi', null, g.to)),
@@ -480,11 +639,17 @@ const clock = ms => {
 // For a ride on a line, what the train you boarded was timetabled to take, so the
 // timed ride teaches how late it runs.
 function plannedFor(leg, trip) {
-  const line = leg.lineId && trip.boarded && (trip.ride || leg.id) === leg.id && state.lines.find(x => x.id === leg.lineId);
-  if (!line) return {};
-  const at = new Date(trip.stepStart);
-  const planned = plannedRide(line, leg.board, leg.alight, at.getDay(), at.getHours() * 60 + at.getMinutes());
-  return planned == null ? {} : { planned };
+  if (!trip.boarded) return {};
+  const planned = plannedOf(leg, trip.ride || leg.id, trip.stepStart);
+  return { at: trip.stepStart, ...(planned == null ? {} : { planned }) };
+}
+
+// The ride the timetable expected for one way of riding a step, boarded at `at`.
+function plannedOf(leg, rideId, at) {
+  const step = leg.lineId ? { ...leg, line: state.lines.find(x => x.id === leg.lineId) || null } : leg;
+  const opt = legOptions(step).find(o => o.id === rideId);
+  const d = new Date(at);
+  return opt ? timetabledRide(opt, d.getDay(), d.getHours() * 60 + d.getMinutes()) : null;
 }
 
 function nextStep(skip = false) {
@@ -515,12 +680,11 @@ function openTripReview() {
   const trip = state.trip, route = tripRoute();
   const rows = trip.laps.map(lap => ({ ...lap, leg: route.legs.find(l => l.id === (lap.of || lap.legId)), keep: true }));
   const label = r => (r.wait ? `Waiting for ${waitName(r.leg)}` : legLabel(legOptions(r.leg).find(o => o.id === r.legId) || r.leg));
-  // A ride on a step with several lines can be moved to the line really taken. Only the
-  // step's own line has a timetable to compare with.
+  // A ride on a step with several lines can be moved to the line really taken, and is then
+  // compared with that line's timetable.
   const ridePicker = r => h('select', { class: 'ride-pick', 'aria-label': `Which line for ${legLabel(r.leg)}`, onchange: e => {
-    if (r.legId === r.leg.id) r.mainPlanned = r.planned;
     r.legId = e.target.value;
-    r.planned = r.legId === r.leg.id ? r.mainPlanned : null;
+    r.planned = r.at ? plannedOf(r.leg, r.legId, r.at) : null;
   } }, legOptions(r.leg).map(o => h('option', { value: o.id, selected: o.id === r.legId }, legLabel(o))));
   const end = () => { state.trip = null; };
   const { close } = dialog(h('form', { class: 'review', onsubmit: e => {

@@ -9,10 +9,34 @@ export const waitId = legId => `${legId}~wait`;
 // Rides on one are logged under its own id, so each line keeps its own average.
 export const altId = (legId, alt) => `${legId}~${alt}`;
 export const hasAlts = leg => (leg.kind === 'bus' || leg.kind === 'train') && !!leg.alts?.length;
+// Steps linked to the official timetable that have no trips yet, counted per way of riding.
+export const missingTimes = routes => routes.reduce((n, r) => n + r.legs.reduce((m, l) => m + legOptions(l).filter(o => isTransit(o) && o.feed && !o.trips).length, 0), 0);
+
 // Every way to ride a step, the step itself first, each shaped like a step of its own.
 export const legOptions = leg => [leg, ...(hasAlts(leg) ? leg.alts.map(a => ({
   ...leg, id: altId(leg.id, a.id), label: a.name, minutes: a.minutes, times: a.times || '', lineId: undefined, line: null, alts: [], alt: a.id,
+  // A line can have stops of its own, like a bus home that stops a street away from another.
+  feed: a.feed || leg.feed, feedLine: a.feedLine, trips: a.trips || null, feedDate: a.feedDate,
 })) : [])];
+
+/* A step filled from the official timetable keeps each line's trips for the coming week,
+   `trips[weekday] = [[departure, ride], ...]`, since a train's ride depends on its stops. */
+const fromFeed = leg => isTransit(leg) && !!leg.trips;
+const tripsOf = (leg, weekday) => (weekday == null ? Object.values(leg.trips).flat() : leg.trips[weekday] || [])
+  .map(([dep, ride]) => ({ dep, ride }));
+// The usual ride of a line from the timetable, for lists and rough sums.
+export const typicalRide = leg => {
+  const rides = Object.values(leg.trips || {}).flat().map(t => t[1]).sort((a, b) => a - b);
+  return rides.length ? rides[Math.floor(rides.length / 2)] : null;
+};
+// What the timetable said a ride boarded at `atMin` would take, to compare a timed ride with.
+export function timetabledRide(leg, weekday, atMin) {
+  if (onLine(leg)) return plannedRide(leg.line, leg.board, leg.alight, weekday, atMin);
+  if (!fromFeed(leg)) return null;
+  const deps = tripsOf(leg, weekday);
+  if (!deps.length) return typicalRide(leg);
+  return deps.reduce((best, d) => (Math.abs(d.dep - atMin) < Math.abs(best.dep - atMin) ? d : best)).ride;
+}
 
 const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
@@ -112,6 +136,10 @@ const departuresOf = (leg, weekday, stats) => {
     const late = stats.get(leg.id)?.late ?? 0;
     return lineDepartures(leg.line, leg.board, leg.alight, weekday ?? null).map(d => ({ ...d, ride: Math.max(1, d.ride + late) }));
   }
+  if (fromFeed(leg)) {
+    const late = stats.get(leg.id)?.late ?? 0;
+    return tripsOf(leg, weekday ?? null).map(d => ({ ...d, ride: Math.max(1, d.ride + late) }));
+  }
   if (!isTransit(leg) || !leg.times?.trim()) return null;
   const ride = legMinutes(leg, stats);
   try { return parseDepartures(leg.times, weekday ?? null).map(dep => ({ dep, ride })); } catch { return null; }
@@ -137,6 +165,8 @@ export const legMinutes = (leg, stats) => {
     const ride = lineRides(leg.line, leg.board, leg.alight)[0]?.ride;
     if (ride != null) return Math.max(1, ride + (stats.get(leg.id)?.late ?? 0));
   }
+  // From the official timetable, the usual ride, adjusted by how late timed rides ran.
+  if (fromFeed(leg) && typicalRide(leg) != null) return Math.max(1, typicalRide(leg) + (stats.get(leg.id)?.late ?? 0));
   return stats.get(leg.id)?.avg ?? (+leg.minutes || 0);
 };
 const activeLegs = (route, on = []) => route.legs.filter(l => !l.optional || on.includes(l.id));
@@ -154,6 +184,13 @@ function toLeg(leg, dep, arr, stats, route, d, step = leg) {
     return { ...base, type: 'ride', mode: leg.kind, line: label, from: leg.board, to: leg.alight, service, onLine: true, planned: d ? d.ride - (stats.get(leg.id)?.late ?? 0) : null,
       text: `${named} from ${leg.board}, off at ${leg.alight}, ${arr - dep} min` };
   }
+  if (fromFeed(leg) && leg.feed) {
+    const { from, to } = leg.feed;
+    return { ...base, type: 'ride', mode: leg.kind, line: label, from: from.name, to: to.name, onLine: true, planned: d ? d.ride - (stats.get(leg.id)?.late ?? 0) : null,
+      text: `${label} from ${from.name}, off at ${to.name}, ${arr - dep} min` };
+  }
+  // Linked to the official timetable, but its trips have not arrived, so it cannot wait for a departure.
+  if (isTransit(leg) && leg.feed) return { ...base, type: 'ride', mode: leg.kind, line: label, noTimes: true, text: `${label}, ${arr - dep} min, departure times not loaded yet` };
   if (isTransit(leg)) return { ...base, type: 'ride', mode: leg.kind, line: label, text: `${label}, ${arr - dep} min` };
   if (leg.kind === 'stop') return { ...base, type: 'stop', text: `${label}, ${arr - dep} min` };
   return { ...base, type: 'walk', text: `${label}, ${arr - dep} min` };
@@ -202,8 +239,10 @@ export const routesBetween = (routes, from, to) => routes.filter(r => norm(r.fro
 export const reversedRoute = (route, makeId) => ({
   id: makeId(), from: route.to, to: route.from, name: route.name, preferred: false, ...(route.day ? { day: route.day } : {}),
   // A step on a line keeps its line, so the way back has the line's return times.
+  // A step from the official timetable swaps its stops, and gets its trips at the next refresh.
   legs: [...route.legs].reverse().map(l => ({ ...l, id: makeId(), times: '', ...(l.lineId ? { board: l.alight, alight: l.board } : {}),
-    ...(l.alts ? { alts: l.alts.map(a => ({ ...a, times: '' })) } : {}) })),
+    ...(l.feed ? { feed: { from: l.feed.to, to: l.feed.from }, trips: null, feedDate: null } : {}),
+    ...(l.alts ? { alts: l.alts.map(a => ({ ...a, times: '', ...(a.trips ? { trips: null, feedDate: null } : {}), ...(a.feed ? { feed: { from: a.feed.to, to: a.feed.from } } : {}) })) } : {}) })),
 });
 
 // Picks between your routes, then falls back to timetables for places with none.

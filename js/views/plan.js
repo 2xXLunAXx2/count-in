@@ -8,7 +8,7 @@ import { placeFromText } from '../myroutes.js';
 import { writable } from '../rules.js';
 import { openEditor, openNewEvent } from './editor.js';
 import { ribbon, legRow, addToCalendar } from './routes.js';
-import { openRouteEditor, startTrip } from './myroutes.js';
+import { openRouteEditor, startTrip, missingTimesHelp } from './myroutes.js';
 import { toast, icon } from '../ui.js';
 
 export const homePlace = () => state.settings.home || state.route.from || '';
@@ -86,7 +86,9 @@ function eventRow(i) {
   return row(i, fmtTime(i.start), [
     h('button', { class: 'tl-event', style: { '--c': color, '--ink': inkOn(color) }, onclick: () => openEditor(i.ev) },
       h('span', { class: 'tl-event-title', dir: 'auto' }, i.ev.summary || 'Untitled'),
-      h('span', { class: 'tl-event-meta' }, `Until ${fmtTime(i.end)} · ${dur(span(i))}`, i.ev.location ? ' · ' : '', i.ev.location ? h('bdi', null, i.ev.location) : null)),
+      h('span', { class: 'tl-event-meta' }, `Until ${fmtTime(i.end)} · ${dur(span(i))}`, i.ev.location ? ' · ' : '', i.ev.location ? h('bdi', null, i.ev.location) : null),
+      i.arriveAt != null || i.leaveAt != null ? h('span', { class: 'tl-event-meta own-times' },
+        [i.arriveAt != null ? `Be there by ${fmtTime(i.arriveAt)}` : null, i.leaveAt != null ? `leaving at ${fmtTime(i.leaveAt)}` : null].filter(Boolean).join(', ')) : null),
     i.unresolved ? h('form', {
       class: 'tl-fix', onsubmit: e => { e.preventDefault(); setAlias(i.unresolved, e.target.elements.stop.value); },
     },
@@ -129,6 +131,7 @@ function travelRow(i, dayMs) {
       ribbon(j),
       i.late ? h('p', { class: 'tl-warn' }, `You will be ${dur(i.late)} late. The soonest arrival is ${fmtClock(j.arrive)}.`) : null,
       i.leaveEarly ? h('p', { class: 'tl-warn' }, `Leave ${dur(i.leaveEarly)} before the previous event ends to make this.`) : null,
+      j.legs.some(l => l.noTimes) ? h('p', { class: 'tl-warn no-times' }, `${j.legs.filter(l => l.noTimes).map(l => l.label).join(', ')}: departure times have not loaded, so these times are guesses. `, missingTimesHelp()) : null,
       tripChoices(j),
       route ? h('button', { type: 'button', class: 'btn ghost tl-timer', onclick: () => startTrip(route) }, 'Start timer') : null,
       h('details', { class: 'j-details' },

@@ -6,7 +6,7 @@ import { calById, network, addTravelEvent, lineName, placeNames, routerFor } fro
 import { placeFromText } from '../myroutes.js';
 import { toast, confirmDialog, icon, dialog } from '../ui.js';
 import { openWalkLog, walksCard } from './walks.js';
-import { myRoutesSection, openLegLog, openRouteEditor, startTrip } from './myroutes.js';
+import { myRoutesSection, openLegLog, openRouteEditor, startTrip, missingTimesHelp } from './myroutes.js';
 
 const lastResult = { journeys: null, query: null, error: '' };
 
@@ -59,6 +59,7 @@ export function legRow(l, next, transfer, dateMs) {
         h('div', { class: 'leg-body' },
           h('p', null, h('bdi', null, l.label), l.service ? [' (', h('bdi', null, l.service), ')'] : null, ` · ${l.min} min`),
           l.onLine ? h('p', { class: 'hint' }, 'From ', h('bdi', null, l.from), ', off at ', h('bdi', null, l.to), ` at ${fmtClock(l.arr)}`) : null,
+          l.noTimes ? h('p', { class: 'tl-warn' }, 'Its departure times have not loaded, so this time is a guess. ', missingTimesHelp()) : null,
           h('p', { class: 'hint' }, l.onLine ? (l.logged ? `Timetable, adjusted by ${l.logged} timed ride${l.logged === 1 ? '' : 's'} · ` : 'Timetable · ') : l.logged ? `Your average of ${l.logged} · ` : 'Your estimate · ',
             h('button', { type: 'button', class: 'link', onclick: () => openLegLog(l.legId, l.label, dateMs, l.planned, l.choices) }, 'Log a time')))),
       gap > 0 ? h('li', { class: 'leg-gap' }, `${gap} min wait`) : null,
