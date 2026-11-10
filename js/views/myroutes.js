@@ -2,7 +2,7 @@
 import { state, save, emit } from '../store.js';
 import { h, uid, norm, ymd, parseYmd, fmt, fmtTime, fmtClock, pad } from '../util.js';
 import { placeNames } from '../core.js';
-import { LEG_KINDS, isTransit, waitId, hasAlts, legOptions, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom, lineRides, timetabledRide, withLines, missingTimes } from '../myroutes.js';
+import { LEG_KINDS, isTransit, waitId, hasAlts, legOptions, routeStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom, lineRides, timetabledRide, withLines, missingTimes } from '../myroutes.js';
 import { dialog, toast, icon, confirmDialog } from '../ui.js';
 import { tripPlannerCard } from './tripplanner.js';
 import { feedStatus, searchStops, findLines, feedResults, watchPairs, applyResults, fillOption, lineLabel, lineSummary, pairKey, fedOptions, changeText } from '../feed.js';
@@ -638,7 +638,7 @@ function routeRow(stored, stats) {
       const s = stats.get(l.id), w = stats.get(waitId(l.id));
       const tail = [w ? `, after waiting ${w.avg} min on average` : '', l.optional ? ', only sometimes' : ''];
       if (l.line && l.board && l.alight) return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), h('bdi', null, lineStepText(l, stats)), ...tail, altsText(l));
-      return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), `, ${legMinutes(l, stats)} min`, s ? ` (average of ${s.count})` : '',
+      return h('li', { class: l.optional ? 'hint' : '' }, h('bdi', null, legLabel(l)), `, ${legMinutes(l, stats)} min`, s ? ` (average of ${s.count}${s.shared ? ', from every route with this walk' : ''})` : '',
         l.feed ? [', from ', h('bdi', null, l.feed.from.name), ' to ', h('bdi', null, l.feed.to.name), ' on the official timetable'] : null,
         ...tail, isTransit(l) ? scheduleText(l) : '', l.lineId && !l.line ? ', its line was removed' : '', altsText(l));
     })),
@@ -804,7 +804,7 @@ function handTypedCard() {
 const openPairs = new Set();
 
 export function myRoutesSection() {
-  const stats = legStats(state.legSamples);
+  const stats = routeStats(state.myRoutes, state.legSamples);
   const groups = routeGroups(state.myRoutes.filter(x => !x.day), state.settings.home);
   const oneTime = state.myRoutes.filter(r => r.day).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
   return [

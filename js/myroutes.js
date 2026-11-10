@@ -167,6 +167,39 @@ export function legStats(samples = []) {
   return new Map([...totals].map(([id, t]) => [id, { avg: Math.ceil(t.sum / t.count), count: t.count, ...(t.timed ? { late: Math.ceil(t.over / t.timed), timed: t.timed } : {}) }]));
 }
 
+/* The same walk often appears in several routes, like MyTone to Netanya Sapir on the way to WIS
+   and to BIU, or Golomb to home after bus 16 from anywhere. A walk is known by its two ends:
+   the route's own start or end, or the stop of the timetable step next to it. Either way
+   round counts as the same walk. A walk next to a lift or another walk has an end that is
+   not known, so it keeps its own times. */
+export function walkKeys(routes) {
+  const keys = new Map();
+  const place = n => `place:${norm(n)}`;
+  for (const r of routes) {
+    r.legs.forEach((l, i) => {
+      if (l.kind !== 'walk') return;
+      const before = r.legs[i - 1], after = r.legs[i + 1];
+      const a = !before ? place(r.from) : before.feed ? `stop:${before.feed.to.key}` : null;
+      const b = !after ? place(r.to) : after.feed ? `stop:${after.feed.from.key}` : null;
+      if (a && b && a !== b) keys.set(l.id, `walk:${[a, b].sort().join('|')}`);
+    });
+  }
+  return keys;
+}
+
+// Timed averages, with each walk's times shared by every route that has the same walk.
+export function routeStats(routes, samples = []) {
+  const keys = walkKeys(routes);
+  const pooled = legStats(samples.map(s => (keys.has(s.legId) ? { ...s, legId: keys.get(s.legId) } : s)));
+  const legsOf = new Map();
+  for (const [id, k] of keys) legsOf.set(k, [...(legsOf.get(k) || []), id]);
+  for (const [id, k] of keys) {
+    const s = pooled.get(k);
+    if (s) pooled.set(id, { ...s, ...(legsOf.get(k).length > 1 ? { shared: true } : {}) });
+  }
+  return pooled;
+}
+
 // A step on a line counts its slowest service, as a typical figure for lists.
 export const legMinutes = (leg, stats) => {
   if (onLine(leg)) {
@@ -267,7 +300,7 @@ export const reversedRoute = (route, makeId) => ({
 // one-time trip, used only on that date.
 export function makeRouter({ routes: all = [], lines = [], samples = [], choices = {}, dayKey = '', weekday, knows = () => false, fallback = null }) {
   const routes = withLines(all.filter(r => !r.day || r.day === dayKey), lines);
-  const stats = legStats(samples);
+  const stats = routeStats(all, samples);
   const keyOf = (from, to) => `${dayKey}|${norm(from)}>${norm(to)}`;
   const decorate = (from, to, journeys, best) => {
     const key = keyOf(from, to);
