@@ -1,10 +1,11 @@
 // Your places, your routes, and the stopwatch that keeps their times honest.
 import { state, save, emit } from '../store.js';
-import { h, uid, norm, ymd, parseYmd, fmt, pad } from '../util.js';
+import { h, uid, norm, ymd, parseYmd, fmt, fmtTime, fmtClock, pad } from '../util.js';
 import { placeNames } from '../core.js';
 import { LEG_KINDS, isTransit, waitId, hasAlts, legOptions, legStats, legMinutes, legLabel, parseDepartures, reversedRoute, travelFrom, lineRides, timetabledRide, withLines, missingTimes } from '../myroutes.js';
 import { dialog, toast, icon, confirmDialog } from '../ui.js';
-import { feedStatus, searchStops, findLines, feedResults, watchPairs, applyResults, fillOption, lineLabel, lineSummary, pairKey, fedOptions } from '../feed.js';
+import { tripPlannerCard } from './tripplanner.js';
+import { feedStatus, searchStops, findLines, feedResults, watchPairs, applyResults, fillOption, lineLabel, lineSummary, pairKey, fedOptions, changeText } from '../feed.js';
 
 const persist = (...keys) => { save(...keys); emit(); };
 const sampleDay = () => ymd(Date.now());
@@ -191,12 +192,46 @@ export async function syncTimetable() {
   try {
     await watchPairs(state.myRoutes);
     const results = await feedResults();
-    const changed = applyResults(state.myRoutes, results);
-    if (changed) { state.myRoutes = [...state.myRoutes]; persist('myRoutes'); }
+    const notes = [];
+    const changed = applyResults(state.myRoutes, results, notes);
+    if (changed) {
+      state.myRoutes = [...state.myRoutes];
+      if (notes.length) state.feedChanges = [...groupChanges(notes), ...(state.feedChanges || [])].slice(0, 40);
+      persist('myRoutes', 'feedChanges');
+    }
     // Stops new to the helper are read in the background, so look again shortly.
     const waiting = state.myRoutes.some(r => r.legs.some(l => fedOptions(l).some(({ feed }) => !results.pairs?.[pairKey(feed)])));
     if (waiting && !syncTimetable.soon) syncTimetable.soon = setTimeout(() => { syncTimetable.soon = null; syncTimetable(); }, 30000);
   } catch { /* the helper is busy or stopped; the next check tries again */ }
+}
+
+// The same change on several days, like a new timetable from Sunday to Thursday, is one note.
+export function groupChanges(notes) {
+  const out = new Map();
+  for (const n of notes) {
+    const text = changeText(n), key = `${n.routeId}|${n.line}|${n.from}|${text}`;
+    if (!out.has(key)) out.set(key, { id: uid(), at: new Date().toISOString(), route: n.route, line: n.line, from: n.from, to: n.to, text, dates: [] });
+    if (n.date) out.get(key).dates.push(n.date);
+  }
+  return [...out.values()].map(c => ({ ...c, dates: c.dates.sort() }));
+}
+
+// What changed in the official timetable on your routes, until you dismiss it.
+export function changesCard() {
+  const list = state.feedChanges || [];
+  if (!list.length) return null;
+  const dismiss = ids => { state.feedChanges = state.feedChanges.filter(c => !ids.includes(c.id)); persist('feedChanges'); };
+  const days = c => c.dates.map(d => fmt(parseYmd(d), { weekday: 'short', day: 'numeric', month: 'short' })).join(', ');
+  return h('section', { class: 'card feed-changes' },
+    h('div', { class: 'card-head' },
+      h('div', null, h('h2', null, 'Timetable changes'), h('p', { class: 'hint' }, 'The official timetable changed on your routes. Your plans already use the new times.')),
+      h('button', { class: 'btn ghost', onclick: () => dismiss(list.map(c => c.id)) }, 'Dismiss all')),
+    h('ul', { class: 'change-list' }, list.map(c => h('li', null,
+      h('div', null,
+        h('b', { dir: 'auto' }, h('bdi', null, c.line), ', ', h('bdi', null, c.from), ' to ', h('bdi', null, c.to)),
+        h('p', { class: 'hint' }, h('bdi', null, c.route), c.dates.length ? `, ${days(c)}` : ''),
+        h('p', null, c.text)),
+      h('button', { class: 'icon-btn', 'aria-label': `Dismiss the change to ${c.line}`, onclick: () => dismiss([c.id]), html: icon('x') })))));
 }
 
 // What to do about steps whose times have not arrived, which depends on where you are.
@@ -216,7 +251,7 @@ function feedStatusText() {
 }
 
 // One stop, found by name or by the code on its sign.
-function stopPicker(label, chosen, onPick) {
+export function stopPicker(label, chosen, onPick) {
   const results = h('ul', { class: 'stop-results' });
   const input = h('input', { type: 'search', dir: 'auto', class: 'stop-search', placeholder: 'Name or code on the sign', value: chosen ? stopName(chosen) : '', 'aria-label': label });
   let timer = 0;
@@ -281,10 +316,12 @@ export function openFeedPicker(step, onDone) {
     delete step.lineId; delete step.board; delete step.alight;
     Object.assign(step, { kind: main.mode, label: lineLabel(main), feedLine: main.id, feed: { from: { key: from.key, name: stopName(from) }, to: { key: to.key, name: stopName(to) } } });
     fillOption(step, main, updated);
-    // Lines with stops of their own were not among these, so they stay as they are.
-    const ownStops = oldAlts.filter(a => a.feed && !others.some(l => l.id === a.feedLine));
+    // Lines with stops of their own were not among these, and other ways like a lift are not on
+    // the timetable at all, so they stay as they are.
+    const otherWay = a => !a.feedLine && (a.kind === 'car' || a.optional);
+    const ownStops = oldAlts.filter(a => otherWay(a) || (a.feed && a.feedLine && !others.some(l => l.id === a.feedLine)));
     step.alts = [...others.map(l => {
-      const old = oldAlts.find(a => !a.feed && (a.feedLine === l.id || a.name === lineLabel(l)));
+      const old = oldAlts.find(a => !otherWay(a) && !a.feed && (a.feedLine === l.id || a.name === lineLabel(l)));
       const alt = { id: old?.id || uid(), name: lineLabel(l), feedLine: l.id, minutes: old?.minutes ?? step.minutes, times: '' };
       fillOption(alt, l, updated);
       return alt;
@@ -344,23 +381,32 @@ export function openRouteEditor(existing, preset = {}) {
     return rides.length === 1 ? `${rides[0].ride} min ride` : rides.map(r => `${r.service}: ${r.ride} min`).join(', ');
   };
   // Other lines on the same step, each with its own minutes and departures.
-  const altsEditor = l => h('div', { class: 'leg-alts' },
-    (l.alts || []).map((a, i) => h('div', { class: 'leg-alt' },
+  // On a step from the official timetable its lines are listed above, so only other ways show.
+  const WAY_KINDS = { bus: 'Bus', train: 'Train', car: 'Lift' };
+  const altsEditor = (l, ownOnly = false) => h('div', { class: 'leg-alts' },
+    (l.alts || []).map((a, i) => (ownOnly && a.feedLine ? null : h('div', { class: 'leg-alt' },
       h('div', { class: 'leg-alt-top' },
         h('span', { class: 'hint' }, 'or'),
-        h('input', { dir: 'auto', class: 'alt-name', value: a.name, placeholder: l.kind === 'bus' ? 'Bus 69' : 'Train', 'aria-label': 'Which line', oninput: e => { a.name = e.target.value; } }),
+        h('input', { dir: 'auto', class: 'alt-name', value: a.name, placeholder: a.kind === 'car' ? 'Lift from Dad' : l.kind === 'bus' ? 'Bus 69' : 'Train', 'aria-label': 'Which way', oninput: e => { a.name = e.target.value; } }),
         h('label', { class: 'leg-min' }, h('input', { type: 'number', min: 0, max: 600, value: a.minutes, 'aria-label': 'Minutes', oninput: e => { a.minutes = Math.max(0, +e.target.value || 0); } }), h('span', { class: 'hint' }, 'min')),
-        h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Remove ${a.name || 'this line'}`, onclick: () => { l.alts.splice(i, 1); if (!l.alts.length) delete l.alts; draw(); }, html: icon('x') })),
-      h('textarea', { dir: 'ltr', rows: 2, class: 'alt-times', value: a.times || '', placeholder: TIMES_HINT, 'aria-label': `Departure times for ${a.name || 'this line'}`, oninput: e => { a.times = e.target.value; } }))),
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': `Remove ${a.name || 'this way'}`, onclick: () => { l.alts.splice(i, 1); if (!l.alts.length) delete l.alts; draw(); }, html: icon('x') })),
+      h('div', { class: 'row gap wrap alt-when' },
+        h('select', { class: 'alt-kind', 'aria-label': 'Kind', onchange: e => { if (e.target.value === l.kind) delete a.kind; else a.kind = e.target.value; draw(); } },
+          Object.entries(WAY_KINDS).map(([k, name]) => h('option', { value: k, selected: (a.kind || l.kind) === k }, name))),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', class: 'alt-optional', checked: !!a.optional, onchange: e => { if (e.target.checked) a.optional = true; else delete a.optional; } }), 'Only sometimes, ticked in Day plan'),
+        h('label', { class: 'check' }, h('input', { type: 'checkbox', class: 'alt-all-the-way', checked: !!a.allTheWay, onchange: e => { if (e.target.checked) a.allTheWay = true; else delete a.allTheWay; } }), 'Takes me all the way'),
+        h('label', { class: 'check' }, 'until', h('input', { type: 'time', class: 'alt-until', value: a.until || '', 'aria-label': 'Only until', onchange: e => { if (e.target.value) a.until = e.target.value; else delete a.until; } }))),
+      (a.kind || l.kind) === 'car' ? null : h('textarea', { dir: 'ltr', rows: 2, class: 'alt-times', value: a.times || '', placeholder: TIMES_HINT, 'aria-label': `Departure times for ${a.name || 'this line'}`, oninput: e => { a.times = e.target.value; } })))),
     h('button', { type: 'button', class: 'link add-alt', onclick: () => {
-      l.alts = [...(l.alts || []), { id: uid(), name: '', minutes: lineOf(l) ? legMinutes({ ...l, line: lineOf(l) }, new Map()) : l.minutes, times: '' }];
+      l.alts = [...(l.alts || []), ownOnly ? { id: uid(), name: '', kind: 'car', minutes: 10, times: '', optional: true }
+        : { id: uid(), name: '', minutes: lineOf(l) ? legMinutes({ ...l, line: lineOf(l) }, new Map()) : l.minutes, times: '' }];
       draw();
-    } }, 'Add another line for this step'),
-    l.alts?.length ? h('p', { class: 'hint' }, 'The one that gets there first is planned. Timing a ride asks which one you took, and each keeps its own average.') : null);
+    } }, ownOnly ? 'Add another way, like a lift' : 'Add another way for this step'),
+    l.alts?.length ? h('p', { class: 'hint' }, 'The one that gets there first is planned, counting one you have only sometimes when it is ticked for that trip. Timing a ride asks which one you took, and each keeps its own average.') : null);
   // A step on the official timetable lists its lines; the timetable sets their times.
   const feedBlock = l => h('div', { class: 'leg-feed' },
     h('p', { class: 'hint' }, 'From ', h('bdi', null, l.feed.from.name), ' to ', h('bdi', null, l.feed.to.name), ', on the official timetable:'),
-    h('ul', { class: 'feed-lines' }, legOptions(l).map(o => h('li', null, h('bdi', null, legLabel(o)), offAt(o, l),
+    h('ul', { class: 'feed-lines' }, legOptions(l).filter(o => o.feedLine).map(o => h('li', null, h('bdi', null, legLabel(o)), offAt(o, l),
       o.trips ? `, ${feedSummary(o.trips)}` : ', its times arrive with the next refresh'))),
     h('div', { class: 'row gap wrap' },
       state.view.feed ? h('button', { type: 'button', class: 'link fill-feed', onclick: () => openFeedPicker(l, draw) }, 'Change stops or lines') : null,
@@ -383,7 +429,7 @@ export function openRouteEditor(existing, preset = {}) {
           h('button', { type: 'button', class: 'icon-btn', disabled: i === 0, 'aria-label': 'Move up', onclick: () => move(i, -1), html: '↑' }),
           h('button', { type: 'button', class: 'icon-btn', disabled: i === draft.legs.length - 1, 'aria-label': 'Move down', onclick: () => move(i, 1), html: '↓' }),
           h('button', { type: 'button', class: 'icon-btn', disabled: draft.legs.length === 1, 'aria-label': 'Remove step', onclick: () => { draft.legs.splice(i, 1); draw(); }, html: icon('x') })),
-        fed ? feedBlock(l) : [
+        fed ? [feedBlock(l), altsEditor(l, true)] : [
           isTransit(l) && linesFor(l).length ? h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Line'),
             h('select', { class: 'leg-line', onchange: e => setLine(l, e.target.value) },
               h('option', { value: '' }, 'None, I will write the times here'),
@@ -445,6 +491,8 @@ export function openRouteEditor(existing, preset = {}) {
     h('div', { class: 'field' }, h('span', { class: 'field-label' }, 'Steps, in order'), h('p', { class: 'hint' }, 'A rough number of minutes is fine. Timed trips replace it with your average.'), legsRoot,
       h('button', { type: 'button', class: 'btn ghost add-leg', onclick: () => { draft.legs.push({ id: uid(), kind: 'walk', label: '', minutes: 5, times: '', optional: false }); draw(); } }, 'Add step')),
     h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!draft.preferred, onchange: e => { draft.preferred = e.target.checked; } }), 'This is my usual route between these places'),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', class: 'fallback', checked: !!draft.fallback, onchange: e => { if (e.target.checked) draft.fallback = true; else delete draft.fallback; } }),
+      'Only when no other route works, like a taxi after the last bus'),
     h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Only for events starting before (optional)'),
       h('input', { type: 'time', class: 'arrive-before', value: draft.arriveBefore || '', onchange: e => { draft.arriveBefore = e.target.value || null; } }),
       h('span', { class: 'field-hint' }, 'For example, a lift that only works for early practice. When it fits, it is used ahead of your usual route.')),
@@ -462,20 +510,85 @@ const sampleIds = l => [...legOptions(l).map(o => o.id), waitId(l.id)];
 // What you wait for on a step, which on one with several lines is any of them.
 const waitName = l => legOptions(l).map(legLabel).join(' or ');
 
-function legHistory(route, stats) {
-  const logged = route.legs.filter(l => sampleIds(l).some(id => stats.has(id)));
+// A route you timed on a day: when you left and arrived, where the times say so.
+export function timedOn(route, dayKey) {
+  const ids = new Set(route.legs.flatMap(sampleIds));
+  const list = state.legSamples.filter(s => s.date === dayKey && (s.routeId ? s.routeId === route.id : ids.has(s.legId)));
+  if (!list.length) return null;
+  const at = list.filter(s => s.at);
+  return { count: list.length, ...(at.length ? { left: Math.min(...at.map(s => s.at)), arrived: Math.max(...at.map(s => s.at + s.minutes * 60000)) } : {}), note: list.find(s => s.note)?.note || '' };
+}
+
+// Changes one saved time, or every time of the trip it was timed on, since a note like heavy
+// bags is about the whole trip.
+function updateSamples(s, patch) {
+  const same = x => x === s || (s.trip && x.trip === s.trip);
+  state.legSamples = state.legSamples.map(x => (same(x) ? Object.fromEntries(Object.entries({ ...x, ...patch }).filter(([, v]) => v !== undefined && v !== '' && v !== false)) : x));
+  persist('legSamples');
+}
+
+// Corrects a saved time in place, so the history never gets a second copy of it.
+function editSample(s, name) {
+  const minutes = h('input', { type: 'number', min: 0, max: 600, required: true, class: 'edit-minutes', value: s.minutes });
+  const date = h('input', { type: 'date', required: true, class: 'edit-date', value: s.date });
+  const { close } = dialog(h('form', { class: 'confirm', onsubmit: e => {
+    e.preventDefault();
+    const fixed = { ...s, minutes: Math.round(+minutes.value), date: date.value };
+    if (s.timed == null && fixed.minutes !== s.minutes && s.at) fixed.timed = s.minutes;
+    state.legSamples = state.legSamples.map(x => (x === s ? fixed : x));
+    close();
+    persist('legSamples');
+    toast(`Changed to ${fixed.minutes} min`, { action: 'Undo', onAction: () => { state.legSamples = state.legSamples.map(x => (x === fixed ? s : x)); persist('legSamples'); } });
+  } },
+    h('h2', { dir: 'auto' }, `Edit: ${name}`),
+    h('div', { class: 'row gap wrap' },
+      h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Minutes'), minutes),
+      h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Day'), date)),
+    h('div', { class: 'row end' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary' }, 'Save'))));
+}
+
+function noteDialog(s) {
+  let text = s.note || '';
+  const { close } = dialog(h('form', { class: 'confirm', onsubmit: e => { e.preventDefault(); updateSamples(s, { note: text.trim() || undefined }); close(); } },
+    h('h2', null, 'Note'),
+    h('p', { class: 'hint' }, s.trip ? 'For every time on this trip.' : 'For this time.'),
+    h('textarea', { rows: 3, dir: 'auto', class: 'sample-note', value: text, placeholder: 'Like: lots of bags, walked slower', oninput: e => { text = e.target.value; } }),
+    h('div', { class: 'row end' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary' }, 'Save note'))));
+}
+
+function legHistory(route) {
+  const samplesOf = l => state.legSamples.filter(s => sampleIds(l).includes(s.legId)).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.at || 0) - (a.at || 0)));
+  const logged = route.legs.filter(l => samplesOf(l).length);
   if (!logged.length) return null;
-  const samplesOf = l => state.legSamples.filter(s => sampleIds(l).includes(s.legId)).sort((a, b) => (a.date < b.date ? 1 : -1));
   const nameOf = (l, s) => (s.legId === waitId(l.id) ? `Waiting for ${waitName(l)}` : legLabel(legOptions(l).find(o => o.id === s.legId)));
   return h('details', { class: 'j-details' }, h('summary', null, 'Timed history'),
-    h('ul', { class: 'walk-history' }, logged.flatMap(l => samplesOf(l).map(s => h('li', null,
-      h('span', { dir: 'auto' }, `${nameOf(l, s)}, ${fmt(parseYmd(s.date), { day: 'numeric', month: 'short' })}`),
+    h('ul', { class: 'walk-history' }, logged.flatMap(l => samplesOf(l).map(s => h('li', { class: s.unusual ? 'unusual' : '' },
+      h('div', { class: 'sample-what' },
+        h('span', { dir: 'auto' }, `${nameOf(l, s)}, ${fmt(parseYmd(s.date), { day: 'numeric', month: 'short' })}`, s.at ? `, ${fmtTime(s.at)}` : ''),
+        // For a wait: when the bus or train came, against the timetable.
+        s.at && s.legId === waitId(l.id) ? h('span', { class: 'hint sample-came' }, `It came at ${fmtTime(s.at + s.minutes * 60000)}`,
+          s.due != null ? `; the next one in the timetable after you got there was ${fmtClock(s.due)}` : '') : null,
+        s.note ? h('span', { class: 'hint sample-note-text', dir: 'auto' }, s.note) : null,
+        s.unusual ? h('span', { class: 'hint' }, 'Left out of your averages') : null,
+        s.timed != null && s.timed !== s.minutes ? h('span', { class: 'hint sample-timed' }, `You changed it; the timer said ${s.timed} min. `,
+          h('button', { class: 'link use-timed', onclick: () => {
+            state.legSamples = state.legSamples.map(x => (x === s ? { ...x, minutes: s.timed } : x));
+            persist('legSamples');
+            toast(`Back to the timer's ${s.timed} min`);
+          } }, 'Use that')) : null),
       h('span', { class: 'mono' }, `${s.minutes} min`),
-      h('button', { class: 'icon-btn', 'aria-label': `Remove ${s.minutes} minute time for ${legLabel(l)}`, onclick: () => {
-        state.legSamples = state.legSamples.filter(x => x !== s);
-        persist('legSamples');
-        toast('Removed that time', { action: 'Undo', onAction: () => { state.legSamples = [...state.legSamples, s]; persist('legSamples'); } });
-      }, html: icon('x') }))))));
+      h('div', { class: 'sample-actions' },
+        h('button', { class: 'link edit-sample', onclick: () => editSample(s, nameOf(l, s)) }, 'Edit'),
+        h('button', { class: 'link add-note', onclick: () => noteDialog(s) }, s.note ? 'Edit note' : 'Note'),
+        h('button', { class: 'link toggle-unusual', onclick: () => {
+          updateSamples(s, { unusual: !s.unusual });
+          toast(s.unusual ? 'Counted in your averages again' : `Left out of your averages${s.trip ? ', with the rest of that trip' : ''}`);
+        } }, s.unusual ? 'Count it' : 'Leave out'),
+        h('button', { class: 'icon-btn', 'aria-label': `Remove ${s.minutes} minute time for ${legLabel(l)}`, onclick: () => {
+          state.legSamples = state.legSamples.filter(x => x !== s);
+          persist('legSamples');
+          toast('Removed that time', { action: 'Undo', onAction: () => { state.legSamples = [...state.legSamples, s]; persist('legSamples'); } });
+        }, html: icon('x') })))))));
 }
 
 // A full day's departures are too long to list on a route, so this counts them per weekday.
@@ -509,14 +622,16 @@ function routeRow(stored, stats) {
   // Other lines on a step, each with its own average and departures.
   const altsText = l => (hasAlts(l) ? legOptions(l).slice(1).map(o => {
     const s = stats.get(o.id);
-    return h('div', { class: 'hint' }, 'or ', h('bdi', null, legLabel(o)), offAt(o, l), `, ${legMinutes(o, stats)} min`, s ? ` (average of ${s.count})` : '', scheduleText(o));
+    return h('div', { class: 'hint' }, 'or ', h('bdi', null, legLabel(o)), offAt(o, l), `, ${legMinutes(o, stats)} min`, s ? ` (average of ${s.count})` : '', scheduleText(o),
+      o.allTheWay ? ', all the way' : '', o.optional ? ', only sometimes' : '', o.until ? `, until ${o.until}` : '');
   }) : null);
   return h('li', { class: 'route-row' },
     h('div', { class: 'route-row-head' },
       h('div', { class: 'route-row-title' },
         h('b', { dir: 'auto' }, route.name || 'Route'),
         route.preferred ? h('span', { class: 'tag' }, 'usual') : null,
-        route.arriveBefore ? h('span', { class: 'tag' }, `before ${route.arriveBefore}`) : null),
+        route.arriveBefore ? h('span', { class: 'tag' }, `before ${route.arriveBefore}`) : null,
+        route.fallback ? h('span', { class: 'tag' }, 'when nothing else works') : null),
       h('span', { class: 'route-total' }, `${clockSum(route, stats)} min`)),
     preview ? h('div', { class: 'ribbon', 'aria-hidden': 'true' }, preview.legs.map(l => h('i', { class: l.type === 'walk' ? 'walk' : l.type === 'stop' ? 'stop' : l.mode, style: { flex: Math.max(l.min, 1) } }))) : null,
     h('ol', { class: 'route-steps' }, route.legs.map(l => {
@@ -527,7 +642,7 @@ function routeRow(stored, stats) {
         l.feed ? [', from ', h('bdi', null, l.feed.from.name), ' to ', h('bdi', null, l.feed.to.name), ' on the official timetable'] : null,
         ...tail, isTransit(l) ? scheduleText(l) : '', l.lineId && !l.line ? ', its line was removed' : '', altsText(l));
     })),
-    legHistory(route, stats),
+    legHistory(route),
     h('div', { class: 'row gap wrap route-actions' },
       h('button', { class: 'btn primary', onclick: () => startTrip(stored) }, 'Start timer'),
       h('button', { class: 'btn ghost', onclick: () => openRouteEditor(stored) }, 'Edit'),
@@ -555,6 +670,51 @@ export async function loadPreparedRoutes() {
     state.view.prepared = list.filter(r => importedVersion(r.id) < (r.version || 1) && (!r.retired || state.myRoutes.some(x => x.id === r.id)));
     if (state.view.prepared.length) emit();
   } catch { /* no prepared routes, or running from a saved copy */ }
+  try {
+    const fixes = await (await fetch('data/fixes.json', { cache: 'no-store' })).json();
+    state.view.fixes = fixes.filter(f => !(state.settings.appliedFixes || []).includes(f.id));
+    if (state.view.fixes.length) emit();
+  } catch { /* no fixes prepared */ }
+}
+
+/* Fixes prepared for your saved times, like replacing times entered by mistake. Each is
+   offered once, applied only when you press Apply, and can be undone right after. */
+export function applyFix(fix) {
+  const was = state.legSamples;
+  const remove = new Set(fix.remove || []);
+  const added = (fix.add || []).map(a => {
+    const at = a.at ? new Date(a.at).getTime() : null;
+    const step = state.myRoutes.flatMap(r => r.legs).find(l => legOptions(l).some(o => o.id === a.legId));
+    const planned = at && step ? plannedOf(step, a.legId, at) : null;
+    return { id: uid(), legId: a.legId, minutes: a.minutes, date: a.date, ...(at ? { at } : {}), ...(planned != null ? { planned } : {}), ...(a.note ? { note: a.note } : {}) };
+  });
+  state.legSamples = [...state.legSamples.filter(s => !remove.has(s.legId)), ...added];
+  state.settings.appliedFixes = [...(state.settings.appliedFixes || []), fix.id];
+  state.view.fixes = (state.view.fixes || []).filter(f => f.id !== fix.id);
+  save('settings');
+  persist('legSamples');
+  return () => {
+    state.legSamples = was;
+    state.settings.appliedFixes = state.settings.appliedFixes.filter(id => id !== fix.id);
+    state.view.fixes = [...(state.view.fixes || []), fix];
+    save('settings');
+    persist('legSamples');
+  };
+}
+
+function fixesCard() {
+  const list = state.view.fixes || [];
+  if (!list.length) return null;
+  return list.map(f => {
+    const now = state.legSamples.filter(s => (f.remove || []).includes(s.legId)).length;
+    return h('section', { class: 'card prepared fix' },
+      h('div', { class: 'card-head' },
+        h('div', null, h('h2', null, 'Fix ready: ', h('bdi', null, f.title)), h('p', { class: 'hint' }, f.text, ` You have ${now} time${now === 1 ? '' : 's'} there now.`)),
+        h('button', { class: 'btn primary apply-fix', onclick: () => {
+          const undo = applyFix(f);
+          toast('Fixed your times', { action: 'Undo', onAction: undo });
+        } }, 'Apply')));
+  });
 }
 
 const importedVersion = id => state.settings.routeVersions?.[id] ?? ((state.settings.importedRoutes || []).includes(id) ? 1 : 0);
@@ -589,26 +749,86 @@ function preparedCard() {
       h('button', { class: 'btn primary', onclick: addPrepared }, 'Add to my routes')));
 }
 
+// Routes between the same two places, both ways, with home first in its pairs and the pairs
+// with home first in the list. Within a direction: your usual route, then others, fallbacks last.
+export function routeGroups(routes, home = '') {
+  const isHome = n => !!home && norm(n) === norm(home);
+  const pairs = new Map();
+  for (const r of routes) {
+    const [a, b] = [r.from, r.to].sort((x, y) => (isHome(y) - isHome(x)) || x.localeCompare(y));
+    const key = `${norm(a)}|${norm(b)}`;
+    if (!pairs.has(key)) pairs.set(key, { a, b, ways: new Map() });
+    const ways = pairs.get(key).ways, way = `${norm(r.from)}>${norm(r.to)}`;
+    if (!ways.has(way)) ways.set(way, { from: r.from, to: r.to, routes: [] });
+    ways.get(way).routes.push(r);
+  }
+  const rank = r => (r.preferred ? 0 : r.fallback ? 2 : 1);
+  return [...pairs.values()]
+    .sort((x, y) => (isHome(y.a) - isHome(x.a)) || x.a.localeCompare(y.a) || x.b.localeCompare(y.b))
+    .map(p => ({ a: p.a, b: p.b, ways: [...p.ways.values()]
+      .sort((x, y) => (norm(y.from) === norm(p.a)) - (norm(x.from) === norm(p.a)))
+      .map(w => ({ ...w, routes: [...w.routes].sort((x, y) => rank(x) - rank(y)) })) }));
+}
+
+// Routes with a bus or train whose times were typed by hand, from before the official timetable.
+export const handTyped = routes => routes.filter(r => r.legs.some(l => (l.kind === 'bus' || l.kind === 'train') && !l.feed));
+
+function handTypedCard() {
+  const list = handTyped(state.myRoutes);
+  // Routes ready to add replace some of these, so they come first.
+  if (!list.length || state.view.prepared?.length) return null;
+  const keep = state.myRoutes.filter(r => !list.includes(r));
+  const lines = state.lines.filter(x => !keep.some(r => r.legs.some(l => l.lineId === x.id)));
+  const remove = async () => {
+    const what = `${list.length} route${list.length === 1 ? '' : 's'}${lines.length ? ` and ${lines.length} line${lines.length === 1 ? '' : 's'}` : ''}`;
+    if (!await confirmDialog({ title: `Remove ${what}?`, body: 'Their timed history goes too. You can undo this right after.', action: `Remove ${what}`, danger: true })) return;
+    const was = { myRoutes: state.myRoutes, legSamples: state.legSamples, lines: state.lines };
+    const ids = new Set(list.flatMap(r => r.legs.flatMap(sampleIds)));
+    state.myRoutes = keep;
+    state.legSamples = state.legSamples.filter(s => !ids.has(s.legId));
+    state.lines = state.lines.filter(x => !lines.includes(x));
+    persist('myRoutes', 'legSamples', 'lines');
+    toast(`Removed ${what}`, { action: 'Undo', onAction: () => { Object.assign(state, was); persist('myRoutes', 'legSamples', 'lines'); } });
+  };
+  return h('section', { class: 'card hand-typed' },
+    h('div', { class: 'card-head' },
+      h('div', null, h('h2', null, 'Routes with times you typed'),
+        h('p', { class: 'hint' }, 'These are from before the official timetable, so their bus and train times do not stay current.')),
+      h('button', { class: 'btn danger-ghost', onclick: remove }, `Remove ${list.length === 1 ? 'it' : `these ${list.length}`}`)),
+    h('ul', { class: 'prepared-list' },
+      list.map(r => h('li', { dir: 'auto' }, h('bdi', null, r.from), ' → ', h('bdi', null, r.to), ', ', h('bdi', null, r.name), r.day ? `, only on ${fmt(parseYmd(r.day), { day: 'numeric', month: 'short' })}` : '')),
+      lines.map(x => h('li', { dir: 'auto' }, 'Line: ', h('bdi', null, x.name)))));
+}
+
+// Which place pairs are open, for this visit only.
+const openPairs = new Set();
+
 export function myRoutesSection() {
   const stats = legStats(state.legSamples);
-  const groups = new Map();
+  const groups = routeGroups(state.myRoutes.filter(x => !x.day), state.settings.home);
   const oneTime = state.myRoutes.filter(r => r.day).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
-  for (const r of state.myRoutes.filter(x => !x.day)) {
-    const k = `${r.from} → ${r.to}`;
-    if (!groups.has(k)) groups.set(k, { from: r.from, to: r.to, routes: [] });
-    groups.get(k).routes.push(r);
-  }
   return [
     preparedCard(),
+    fixesCard(),
+    handTypedCard(),
+    changesCard(),
+    tripPlannerCard(),
     h('section', { class: 'card' },
       h('div', { class: 'card-head' },
         h('div', null, h('h2', null, 'Your routes'), h('p', { class: 'hint' }, 'The trips you really take. Day plan uses them for every journey in your day.'),
           feedStatusText() ? h('p', { class: `${missingTimes(state.myRoutes) ? 'tl-warn' : 'hint'} feed-status` }, feedStatusText()) : null),
         h('button', { class: 'btn primary', onclick: () => openRouteEditor() }, 'New route')),
-      groups.size ? [...groups.values()].map(g => h('div', { class: 'route-group' },
-        h('div', { class: 'route-group-head' }, h('h3', { dir: 'auto' }, h('bdi', null, g.from), ' → ', h('bdi', null, g.to)),
-          h('button', { class: 'link', onclick: () => openRouteEditor(null, { from: g.from, to: g.to }) }, 'Another route')),
-        h('ul', { class: 'route-list' }, g.routes.map(r => routeRow(r, stats)))))
+      groups.length ? groups.map(g => {
+        const key = `${norm(g.a)}|${norm(g.b)}`, count = g.ways.reduce((n, w) => n + w.routes.length, 0);
+        const ways = g.ways.map(w => `${w.from} → ${w.to}`);
+        return h('details', { class: 'route-pair', open: openPairs.has(key), ontoggle: e => { if (e.target.open) openPairs.add(key); else openPairs.delete(key); } },
+          h('summary', null, h('span', { class: 'route-pair-name', dir: 'auto' }, h('bdi', null, g.a), ' ↔ ', h('bdi', null, g.b)),
+            h('span', { class: 'hint' }, `${count} route${count === 1 ? '' : 's'}${ways.length === 1 ? `, ${ways[0]} only` : ''}`)),
+          g.ways.map(w => h('div', { class: 'route-group' },
+            h('div', { class: 'route-group-head' }, h('h3', { dir: 'auto' }, h('bdi', null, w.from), ' → ', h('bdi', null, w.to)),
+              h('button', { class: 'link', onclick: () => openRouteEditor(null, { from: w.from, to: w.to }) }, 'Another route')),
+            h('ul', { class: 'route-list' }, w.routes.map(r => routeRow(r, stats))))));
+      })
         : h('div', { class: 'route-empty' }, h('p', null, 'Add your first route, such as MyTone to WIS: walk, train, walk. Rough minutes are fine.'))),
     oneTime.length ? h('section', { class: 'card' },
       h('h2', null, 'One-time routes'),
@@ -644,6 +864,17 @@ function plannedFor(leg, trip) {
   return { at: trip.stepStart, ...(planned == null ? {} : { planned }) };
 }
 
+// The departure the timetable had next after you reached the stop at `at`, from any line on
+// the step, in minutes of the day. Saved with a wait, so you can see later how the bus kept to it.
+function dueAfter(leg, at) {
+  const d = new Date(at), wd = d.getDay(), t = d.getHours() * 60 + d.getMinutes();
+  const deps = legOptions(leg).flatMap(o => {
+    if (o.trips) return (o.trips[wd] || []).map(x => x[0]);
+    try { return o.times ? parseDepartures(o.times, wd) : []; } catch { return []; }
+  });
+  return deps.filter(x => x >= t).sort((a, b) => a - b)[0] ?? null;
+}
+
 // The ride the timetable expected for one way of riding a step, boarded at `at`.
 function plannedOf(leg, rideId, at) {
   const step = leg.lineId ? { ...leg, line: state.lines.find(x => x.id === leg.lineId) || null } : leg;
@@ -656,8 +887,10 @@ function nextStep(skip = false) {
   const trip = state.trip, route = tripRoute();
   const leg = route.legs[trip.index];
   const now = Date.now();
-  if (!skip) trip.laps.push({ legId: trip.ride || leg.id, of: leg.id, minutes: Math.max(1, Math.round((now - trip.stepStart) / 60000)), ...plannedFor(leg, trip) });
-  trip.index++;
+  if (!skip) trip.laps.push({ legId: trip.ride || leg.id, of: leg.id, start: trip.stepStart, minutes: Math.max(1, Math.round((now - trip.stepStart) / 60000)), ...plannedFor(leg, trip) });
+  // A way that takes you all the way, like a lift home, ends the trip.
+  const took = legOptions(leg).find(o => o.id === trip.ride);
+  trip.index = !skip && took?.allTheWay ? route.legs.length : trip.index + 1;
   trip.stepStart = now;
   trip.boarded = false;
   delete trip.ride;
@@ -669,7 +902,8 @@ function nextStep(skip = false) {
 // `ride` is which line was boarded, on a step that more than one serves.
 function boarded(ride = null) {
   const trip = state.trip, leg = tripRoute().legs[trip.index], now = Date.now();
-  trip.laps.push({ legId: waitId(leg.id), of: leg.id, wait: true, minutes: Math.max(0, Math.round((now - trip.stepStart) / 60000)) });
+  const due = dueAfter(leg, trip.stepStart);
+  trip.laps.push({ legId: waitId(leg.id), of: leg.id, wait: true, start: trip.stepStart, minutes: Math.max(0, Math.round((now - trip.stepStart) / 60000)), ...(due != null ? { due } : {}) });
   trip.boarded = true;
   if (ride) trip.ride = ride;
   trip.stepStart = now;
@@ -678,7 +912,8 @@ function boarded(ride = null) {
 
 function openTripReview() {
   const trip = state.trip, route = tripRoute();
-  const rows = trip.laps.map(lap => ({ ...lap, leg: route.legs.find(l => l.id === (lap.of || lap.legId)), keep: true }));
+  // `timed` is what the stopwatch said, kept when you correct it, so it can be brought back.
+  const rows = trip.laps.map(lap => ({ ...lap, timed: lap.minutes, leg: route.legs.find(l => l.id === (lap.of || lap.legId)), keep: true }));
   const label = r => (r.wait ? `Waiting for ${waitName(r.leg)}` : legLabel(legOptions(r.leg).find(o => o.id === r.legId) || r.leg));
   // A ride on a step with several lines can be moved to the line really taken, and is then
   // compared with that line's timetable.
@@ -687,25 +922,62 @@ function openTripReview() {
     r.planned = r.at ? plannedOf(r.leg, r.legId, r.at) : null;
   } }, legOptions(r.leg).map(o => h('option', { value: o.id, selected: o.id === r.legId }, legLabel(o))));
   const end = () => { state.trip = null; };
+  // A note says what was different, and an unusual trip is kept out of your averages but stays
+  // in your history, where it can be counted again.
+  const extra = { note: '', unusual: false };
   const { close } = dialog(h('form', { class: 'review', onsubmit: e => {
     e.preventDefault();
     const kept = rows.filter(r => r.keep && r.minutes >= (r.wait ? 0 : 1));
-    state.legSamples = [...state.legSamples, ...kept.map(r => ({ id: uid(), legId: r.legId, minutes: r.minutes, date: trip.day, ...(r.planned != null ? { planned: r.planned } : {}) }))];
+    const tripId = uid(), note = extra.note.trim();
+    state.legSamples = [...state.legSamples, ...kept.map(r => ({ id: uid(), legId: r.legId, minutes: r.minutes, date: trip.day, trip: tripId, routeId: route.id,
+      ...(r.start ? { at: r.start } : {}), ...(r.planned != null ? { planned: r.planned } : {}), ...(r.minutes !== r.timed ? { timed: r.timed } : {}), ...(r.due != null ? { due: r.due } : {}), ...(note ? { note } : {}), ...(extra.unusual ? { unusual: true } : {}) }))];
     end();
     close();
     persist('legSamples', 'trip');
-    toast(`Saved ${kept.length} time${kept.length === 1 ? '' : 's'}. Your estimates are updated.`);
+    toast(extra.unusual ? `Saved ${kept.length} time${kept.length === 1 ? '' : 's'} in your history, left out of your averages.` : `Saved ${kept.length} time${kept.length === 1 ? '' : 's'}. Your estimates are updated.`);
   } },
     h('h2', null, 'Save these times?'),
-    h('p', { class: 'hint' }, 'Correct anything that was off, and untick a time if the day was unusual, like a late train.'),
+    h('p', { class: 'hint' }, 'Correct anything that was off, and untick a time you do not want saved.'),
     h('ul', { class: 'lap-list' }, rows.map(r => h('li', null,
       !r.wait && hasAlts(r.leg)
         ? h('div', { class: 'check grow' }, h('input', { type: 'checkbox', checked: true, 'aria-label': `Keep the time for ${legLabel(r.leg)}`, onchange: e => { r.keep = e.target.checked; } }), ridePicker(r))
         : h('label', { class: 'check grow' }, h('input', { type: 'checkbox', checked: true, onchange: e => { r.keep = e.target.checked; } }), h('bdi', null, label(r))),
       h('label', { class: 'leg-min' }, h('input', { type: 'number', min: r.wait ? 0 : 1, max: 600, value: r.minutes, 'aria-label': `Minutes for ${label(r)}`, oninput: e => { r.minutes = Math.round(+e.target.value) || 0; } }), h('span', { class: 'hint' }, 'min'))))),
+    h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Note (optional)'),
+      h('textarea', { rows: 2, dir: 'auto', class: 'trip-note', placeholder: 'Like: lots of bags, walked slower', oninput: e => { extra.note = e.target.value; } })),
+    h('label', { class: 'check' }, h('input', { type: 'checkbox', class: 'trip-unusual', onchange: e => { extra.unusual = e.target.checked; } }),
+      'An unusual trip: keep it in my history, but out of my averages'),
     h('div', { class: 'row end' },
       h('button', { type: 'button', class: 'btn ghost', onclick: () => { end(); close(); persist('trip'); toast('Discarded the trip'); } }, 'Discard'),
       h('button', { class: 'btn primary' }, 'Save times'))));
+}
+
+// Where a ride starts and ends, when the official timetable says.
+const stopFrom = l => l.feed?.from?.name || null, stopTo = l => l.feed?.to?.name || null;
+const placeWord = l => (l.kind === 'bus' ? 'the stop' : l.kind === 'train' ? 'the station' : 'the pick-up');
+const rideName = l => (legLabel(l) === 'Train' ? 'the train' : legLabel(l));
+
+/* What the bar says at each moment, made for tapping in a hurry: what you are doing now, what
+   the button confirms, and what comes after it. */
+export function tripStatus(route, trip) {
+  const leg = route.legs[trip.index], next = route.legs[trip.index + 1];
+  const took = legOptions(leg).find(o => o.id === trip.ride) || leg;
+  const last = !next || took.allTheWay;
+  const ride = isTransit(leg);
+  if (ride && !trip.boarded) {
+    const at = stopFrom(leg);
+    return { now: `Waiting for ${hasAlts(leg) ? waitName(leg) : rideName(leg)}${at ? ` at ${at}` : ''}`, then: `Ride${stopTo(leg) ? ` to ${stopTo(leg)}` : ''}`, button: `I'm on ${rideName(leg)}` };
+  }
+  if (ride) {
+    const off = stopTo(took);
+    return { now: `On ${rideName(took)}${off ? `, get off at ${off}` : ''}`, then: last ? 'You are there' : legLabel(next), button: last ? "I've arrived" : `I got off${off ? ` at ${off}` : ''}` };
+  }
+  if (last) return { now: legLabel(leg), then: 'You are there', button: "I've arrived" };
+  if (isTransit(next)) {
+    const at = stopFrom(next) || placeWord(next);
+    return { now: legLabel(leg), then: `Wait for ${hasAlts(next) ? waitName(next) : rideName(next)}`, button: `I'm at ${at}` };
+  }
+  return { now: legLabel(leg), then: legLabel(next), button: `Done: ${legLabel(leg)}` };
 }
 
 // Stays on screen on every page, and survives a reload, since it runs from saved timestamps.
@@ -716,25 +988,32 @@ export function tripBar() {
   const leg = route.legs[trip.index];
   const waiting = isTransit(leg) && !trip.boarded;
   const total = route.legs.length;
-  // Tapped on reaching the stop, so the walk ends there and the wait starts.
-  const next = route.legs[trip.index + 1];
-  const doneLabel = trip.index + 1 === total ? 'Finish' : next.kind === 'bus' ? 'At the stop' : next.kind === 'train' ? 'At the station' : 'Next step';
+  const say = tripStatus(route, trip);
   return h('section', { class: 'trip-bar', 'aria-label': 'Trip timer' },
     h('div', { class: 'trip-info' },
-      h('span', { class: 'eyebrow' }, `Step ${trip.index + 1} of ${total}: `, h('bdi', null, route.name)),
-      h('b', { dir: 'auto' }, waiting ? `Waiting for: ${waitName(leg)}`
-        : legLabel(legOptions(leg).find(o => o.id === trip.ride) || leg))),
+      h('span', { class: 'eyebrow' }, h('bdi', null, route.name), ` · step ${trip.index + 1} of ${total}`),
+      h('b', { class: 'trip-now', dir: 'auto' }, 'Now: ', h('bdi', null, say.now)),
+      h('span', { class: 'trip-next', dir: 'auto' }, 'Next: ', h('bdi', null, say.then))),
     h('span', { class: 'trip-clock', 'data-since': trip.stepStart, role: 'timer' }, clock(Date.now() - trip.stepStart)),
     h('div', { class: 'trip-actions' },
       // With several lines on the step, boarding says which one, so the ride counts for it.
       waiting && hasAlts(leg)
-        ? legOptions(leg).map(o => h('button', { class: 'btn primary board-on', onclick: () => boarded(o.id) }, h('bdi', null, `On ${legLabel(o)}`)))
-        : waiting ? h('button', { class: 'btn primary', onclick: () => boarded() }, 'I boarded')
-        : h('button', { class: 'btn primary', onclick: () => nextStep() }, doneLabel),
-      leg.optional || waiting ? h('button', { class: 'btn ghost', onclick: () => nextStep(true) }, 'Skip') : null,
+        ? legOptions(leg).map(o => h('button', { class: 'btn primary board-on', onclick: () => boarded(o.id) }, h('bdi', null, o.alt && o.kind !== leg.kind ? `${legLabel(o)} instead` : `On ${legLabel(o)}`)))
+        : waiting ? h('button', { class: 'btn primary', onclick: () => boarded() }, h('bdi', null, say.button))
+        : h('button', { class: 'btn primary', onclick: () => nextStep() }, h('bdi', null, say.button)),
+      leg.optional || waiting ? h('button', { class: 'btn ghost', onclick: () => nextStep(true) }, waiting ? 'Skip this ride' : 'Skip this stop') : null,
       h('button', { class: 'btn ghost', onclick: async () => {
         if (await confirmDialog({ title: 'Cancel this trip?', body: 'Times from this trip are not saved.', action: 'Cancel trip', danger: true })) { state.trip = null; persist('trip'); }
-      } }, 'Cancel')));
+      } }, 'Cancel')),
+    // The steps from here on, with the finished ones folded into one, so the current step is
+    // always in view. A bus or train starts with its wait, shown as a step of its own.
+    h('ol', { class: 'trip-steps', 'aria-label': 'Steps' },
+      trip.index ? h('li', { class: 'done' }, `✓ ${trip.index} done`) : null,
+      route.legs.slice(trip.index).flatMap((l, i) => {
+        const here = i === 0, wait = isTransit(l);
+        const chip = (text, now) => h('li', { class: now ? 'now' : here && wait && !now ? (trip.boarded ? 'done' : '') : '', 'aria-current': now ? 'step' : null }, h('bdi', null, text));
+        return wait ? [chip(`Wait for ${rideName(l)}`, here && !trip.boarded), chip(legLabel(l), here && trip.boarded)] : [chip(legLabel(l), here)];
+      })));
 }
 
 setInterval(() => {
@@ -749,11 +1028,14 @@ export function openLegLog(legId, label, dateMs = Date.now(), planned = null, ch
   const minutes = h('input', { type: 'number', min: 1, max: 600, required: true, autofocus: true });
   const date = h('input', { type: 'date', max: today, value: ymd(dateMs) > today ? today : ymd(dateMs), required: true });
   const which = choices?.length > 1 ? h('select', { class: 'log-line' }, choices.map(c => h('option', { value: c.id, selected: c.id === legId }, c.name))) : null;
+  const note = h('textarea', { rows: 2, dir: 'auto', class: 'log-note', placeholder: 'Note (optional), like: lots of bags' });
+  const unusual = h('input', { type: 'checkbox', class: 'log-unusual' });
   const { close } = dialog(h('form', { class: 'confirm', onsubmit: e => {
     e.preventDefault();
     const id = which ? which.value : legId;
     const name = choices?.find(c => c.id === id)?.name || label;
-    state.legSamples = [...state.legSamples, { id: uid(), legId: id, minutes: Math.round(+minutes.value), date: date.value, ...(planned != null && id === legId ? { planned } : {}) }];
+    state.legSamples = [...state.legSamples, { id: uid(), legId: id, minutes: Math.round(+minutes.value), date: date.value, ...(planned != null && id === legId ? { planned } : {}),
+      ...(note.value.trim() ? { note: note.value.trim() } : {}), ...(unusual.checked ? { unusual: true } : {}) }];
     close();
     persist('legSamples');
     toast(`Logged ${Math.round(+minutes.value)} min for ${name}`);
@@ -763,5 +1045,7 @@ export function openLegLog(legId, label, dateMs = Date.now(), planned = null, ch
     h('div', { class: 'row gap wrap' },
       h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Minutes it took'), minutes),
       h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Day'), date)),
+    note,
+    h('label', { class: 'check' }, unusual, 'Unusual: keep it out of my averages'),
     h('div', { class: 'row end' }, h('button', { type: 'button', class: 'btn ghost', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary' }, 'Log time'))));
 }

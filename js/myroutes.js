@@ -13,11 +13,17 @@ export const hasAlts = leg => (leg.kind === 'bus' || leg.kind === 'train') && !!
 export const missingTimes = routes => routes.reduce((n, r) => n + r.legs.reduce((m, l) => m + legOptions(l).filter(o => isTransit(o) && o.feed && !o.trips).length, 0), 0);
 
 // Every way to ride a step, the step itself first, each shaped like a step of its own.
+// Another way can be a lift too, and can be one you have only sometimes (`optional`, ticked
+// per trip in Day plan), or only until a time (`until`), like Dad at the station before 19:00.
 export const legOptions = leg => [leg, ...(hasAlts(leg) ? leg.alts.map(a => ({
-  ...leg, id: altId(leg.id, a.id), label: a.name, minutes: a.minutes, times: a.times || '', lineId: undefined, line: null, alts: [], alt: a.id,
+  ...leg, id: altId(leg.id, a.id), label: a.name, kind: a.kind || leg.kind, minutes: a.minutes, times: a.times || '', lineId: undefined, line: null, alts: [], alt: a.id,
   // A line can have stops of its own, like a bus home that stops a street away from another.
-  feed: a.feed || leg.feed, feedLine: a.feedLine, trips: a.trips || null, feedDate: a.feedDate,
+  feed: a.feedLine ? a.feed || leg.feed : undefined, feedLine: a.feedLine, trips: a.trips || null, feedDate: a.feedDate,
+  // `allTheWay`: it takes you to the end, like a lift home, so the steps after it are skipped.
+  optional: !!a.optional, until: a.until || null, allTheWay: !!a.allTheWay,
 })) : [])];
+// The ways to ride a step on this trip: one you have only sometimes counts when ticked.
+const usableOptions = (step, on = []) => legOptions(step).filter(o => !(o.alt && o.optional) || on.includes(o.id));
 
 /* A step filled from the official timetable keeps each line's trips for the coming week,
    `trips[weekday] = [[departure, ride], ...]`, since a train's ride depends on its stops. */
@@ -148,9 +154,11 @@ const departuresOf = (leg, weekday, stats) => {
 // Average logged minutes per step, rounded up so estimates lean toward being on time. Rides
 // on a line also keep how far they ran from the timetable, `late`, since the timetable
 // already knows a fast train from a slow one.
+// A time marked `unusual`, like a walk with heavy bags, is kept with its note but left out.
 export function legStats(samples = []) {
   const totals = new Map();
   for (const s of samples) {
+    if (s.unusual) continue;
     const t = totals.get(s.legId) || { sum: 0, count: 0, over: 0, timed: 0 };
     t.sum += s.minutes; t.count++;
     if (s.planned != null) { t.over += s.minutes - s.planned; t.timed++; }
@@ -198,24 +206,31 @@ function toLeg(leg, dep, arr, stats, route, d, step = leg) {
 
 // Follows a route from a start time, waiting wherever a departure time is set. Where two
 // services or lines leave, the one that gets there first is taken.
+// A way that takes you all the way, like a lift home, is weighed against finishing the route
+// the usual way, since the usual way still has its steps after this one.
 export function travelFrom(route, start, stats, on, weekday) {
-  let t = start;
-  const legs = [];
-  for (const step of activeLegs(route, on)) {
-    let best = null;
-    for (const leg of legOptions(step)) {
-      const deps = departuresOf(leg, weekday, stats);
-      const d = deps ? deps.filter(x => x.dep >= t).reduce((b, x) => (!b || x.dep + x.ride < b.dep + b.ride ? x : b), null)
-        : { dep: t, ride: legMinutes(leg, stats) };
-      if (d && (!best || d.dep + d.ride < best.d.dep + best.d.ride)) best = { leg, d, timed: !!deps };
-    }
-    if (!best) return null;
-    const { leg, d } = best;
-    legs.push(toLeg(leg, d.dep, d.dep + d.ride, stats, route, best.timed ? d : null, step));
-    t = d.dep + d.ride;
-  }
-  if (!legs.length) return null;
-  return { routeId: route.id, name: route.name, depart: legs[0].dep, arrive: t, legs, rides: legs.filter(l => l.type === 'ride').length };
+  const steps = activeLegs(route, on);
+  const earliest = (leg, t) => {
+    const deps = departuresOf(leg, weekday, stats), until = parseClock(leg.until) ?? Infinity;
+    const d = deps ? deps.filter(x => x.dep >= t && x.dep <= until).reduce((b, x) => (!b || x.dep + x.ride < b.dep + b.ride ? x : b), null)
+      : t <= until ? { dep: t, ride: legMinutes(leg, stats) } : null;
+    return d && { leg, d, timed: !!deps };
+  };
+  const from = (i, t) => {
+    if (i === steps.length) return { arrive: t, legs: [] };
+    const step = steps[i], options = usableOptions(step, on).map(leg => earliest(leg, t)).filter(Boolean);
+    const add = ({ leg, d, timed }, rest) => rest && { arrive: rest.arrive, legs: [toLeg(leg, d.dep, d.dep + d.ride, stats, route, timed ? d : null, step), ...rest.legs] };
+    const onward = options.filter(o => !o.leg.allTheWay).reduce((b, o) => (!b || o.d.dep + o.d.ride < b.d.dep + b.d.ride ? o : b), null);
+    const ways = [
+      onward && add(onward, from(i + 1, onward.d.dep + onward.d.ride)),
+      ...options.filter(o => o.leg.allTheWay).map(o => add(o, { arrive: o.d.dep + o.d.ride, legs: [] })),
+    ].filter(Boolean);
+    return ways.reduce((b, w) => (!b || w.arrive < b.arrive ? w : b), null);
+  };
+  const best = from(0, start);
+  if (!best?.legs.length) return null;
+  const { legs, arrive } = best;
+  return { routeId: route.id, name: route.name, depart: legs[0].dep, arrive, legs, rides: legs.filter(l => l.type === 'ride').length };
 }
 
 // The last moment to set off and still arrive by the deadline.
@@ -223,9 +238,11 @@ export function latestStart(route, deadline, stats, on, weekday) {
   let t = deadline;
   for (const step of [...activeLegs(route, on)].reverse()) {
     let latest = null;
-    for (const leg of legOptions(step)) {
-      const deps = departuresOf(leg, weekday, stats);
-      const d = deps ? deps.filter(x => x.dep + x.ride <= t).reduce((b, x) => (b == null || x.dep > b ? x.dep : b), null) : t - legMinutes(leg, stats);
+    for (const leg of usableOptions(step, on)) {
+      const deps = departuresOf(leg, weekday, stats), until = parseClock(leg.until) ?? Infinity;
+      const by = leg.allTheWay ? deadline : t;
+      const d = deps ? deps.filter(x => x.dep + x.ride <= by && x.dep <= until).reduce((b, x) => (b == null || x.dep > b ? x.dep : b), null)
+        : Math.min(by - legMinutes(leg, stats), until);
       if (d != null && (latest == null || d > latest)) latest = d;
     }
     if (latest == null) return null;
@@ -259,7 +276,9 @@ export function makeRouter({ routes: all = [], lines = [], samples = [], choices
     return {
       ...best, choiceKey: key,
       alternatives: journeys.map(j => ({ routeId: j.routeId, name: j.name, depart: j.depart, arrive: j.arrive, chosen: j.routeId === best.routeId })),
-      optionalLegs: route.legs.filter(l => l.optional).map(l => ({ id: l.id, label: legLabel(l), minutes: legMinutes(l, stats), on: on.includes(l.id) })),
+      optionalLegs: [...route.legs.filter(l => l.optional).map(l => ({ id: l.id, label: legLabel(l), minutes: legMinutes(l, stats), on: on.includes(l.id) })),
+        // Other ways you have only sometimes, like a lift, ticked the same way.
+        ...route.legs.flatMap(l => legOptions(l).filter(o => o.alt && o.optional).map(o => ({ id: o.id, label: legLabel(o), minutes: legMinutes(o, stats), on: on.includes(o.id), way: true, instead: legLabel(l), until: o.until })))],
     };
   };
   // Order: your choice for this trip, then one made for this day, then one for this time
@@ -283,21 +302,29 @@ export function makeRouter({ routes: all = [], lines = [], samples = [], choices
       return start == null ? null : travelFrom(r, start, stats, on, weekday);
     }).filter(Boolean);
   };
+  // A route marked `fallback`, like a taxi for the last bit, counts only when no other route
+  // works, so it never wins just by being faster. A trip you chose for the day still counts.
+  const firstChoice = (from, to, list) => {
+    const chosenId = choices[keyOf(from, to)]?.routeId;
+    const isFallback = j => routes.find(r => r.id === j.routeId)?.fallback && j.routeId !== chosenId;
+    const usual = list.filter(j => !isFallback(j));
+    return (usual.length ? usual : list).map(j => (isFallback(j) ? { ...j, fallback: true } : j));
+  };
   return {
     knows,
     arriveOptions,
     arriveBy(from, to, deadline, eventStart) {
-      const list = arriveOptions(from, to, deadline, eventStart);
+      const list = firstChoice(from, to, arriveOptions(from, to, deadline, eventStart));
       if (list.length) return decorate(from, to, list, pick(from, to, list, (a, b) => b.depart - a.depart));
       return routesBetween(routes, from, to).length ? null : (fallback?.arriveBy(from, to, deadline) ?? null);
     },
     departAfter(from, to, after) {
       const on = choices[keyOf(from, to)]?.on || [];
-      const list = routesBetween(routes, from, to).map(r => {
+      const list = firstChoice(from, to, routesBetween(routes, from, to).map(r => {
         const j = travelFrom(r, after, stats, on, weekday);
         const limit = parseClock(r.arriveBefore);
         return j && (limit == null || j.arrive < limit) ? j : null;
-      }).filter(Boolean);
+      }).filter(Boolean));
       if (list.length) return decorate(from, to, list, pick(from, to, list, (a, b) => a.arrive - b.arrive));
       return routesBetween(routes, from, to).length ? null : (fallback?.departAfter(from, to, after) ?? null);
     },

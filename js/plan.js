@@ -13,6 +13,42 @@ const ownTime = (ev, key) => {
   return m == null ? null : startOfDay(ev.startMs) + m * MIN;
 };
 
+/* When a session of `minutes` at `place`, like practice at MyTone, fits into a day: each
+   quarter hour from `from` to `until` is tried as a start by planning the whole day with it,
+   so the trip there, the trip on to the next event and the trip home all have to work.
+   `build(events)` plans a day the way Day plan does. A start counts when it overlaps no
+   commitment and adds no problem to the day, such as being late or missing the last bus.
+   Starts in a row become one window, keeping the trips for each start. `missing` lists the
+   routes you have none of, which kept some starts out, like MyTone to rehearsal. */
+export function practiceSlots({ events, dayMs, place, minutes, title = 'Practice', from = 6 * 60, until = 21 * 60 + 30, step = 15, build }) {
+  const busy = events.filter(e => !e.optional && !e.allDay);
+  const before = build(events);
+  const gaps = new Set(before.items.filter(i => i.kind === 'noRoute').map(i => `${i.from}>${i.to}`));
+  const windows = [], missing = new Map();
+  let open = null;
+  for (let s = Math.ceil(from / step) * step; s + minutes <= until; s += step) {
+    const start = dayMs + s * MIN, end = start + minutes * MIN;
+    let fit = null;
+    if (!busy.some(e => e.startMs < end && e.endMs > start)) {
+      const trial = { id: 'practice-trial', calId: '', summary: title, location: place, allDay: false, startMs: start, endMs: end, ext: {} };
+      const plan = build([...events, trial]);
+      const at = plan.items.find(i => i.ev === trial);
+      for (const i of plan.items) if (i.kind === 'noRoute' && !gaps.has(`${i.from}>${i.to}`)) missing.set(`${i.from}>${i.to}`, { from: i.from, to: i.to });
+      // The trips to and from the session itself have to work, not just add up to no more problems.
+      const own = plan.items.some(i => (same(i.to, place) || same(i.from, place)) && (i.kind === 'noRoute' || i.late > 0 || i.leaveEarly > 0));
+      if (!own && plan.summary.problems <= before.summary.problems && at?.placed) {
+        const there = plan.items.find(i => i.kind === 'travel' && same(i.to, place) && i.end <= start && i.end > start - 6 * 60 * MIN);
+        const after = plan.items.find(i => (i.kind === 'travel' || i.kind === 'noRoute') && i.start >= end);
+        fit = { there: there ? { from: there.from, leave: there.start, arrive: there.end } : null, next: after ? { to: after.to, leave: after.start, arrive: after.end ?? null, home: !!after.home } : null };
+      }
+    }
+    if (fit && open && s === open.last + step) { open.last = s; open.trips[s] = fit; }
+    else if (fit) windows.push(open = { first: s, last: s, trips: { [s]: fit } });
+    else open = null;
+  }
+  return { windows, missing: [...missing.values()] };
+}
+
 // `resolve(ev)` returns { place, unresolved }. `ev.optional` marks events that do not
 // commit you to being anywhere, such as reminders and subscribed calendars.
 export function buildDayPlan({ events, dayMs, home, net, router, resolve, early = 0, transfer = 4 }) {

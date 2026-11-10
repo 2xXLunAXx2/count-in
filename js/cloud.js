@@ -4,7 +4,7 @@ import { state, save, emit, onSave } from './store.js';
 import { google, drive, NeedsSignIn, NeedsScope } from './google.js';
 
 const FILE = 'count-in-sync.json';
-const KEYS = ['categories', 'appliedRules', 'places', 'myRoutes', 'lines', 'legSamples', 'routeChoices', 'trip', 'route'];
+const KEYS = ['categories', 'appliedRules', 'places', 'myRoutes', 'lines', 'legSamples', 'routeChoices', 'trip', 'route', 'feedChanges'];
 // Settings that describe your life rather than this screen. Theme and filters stay per device.
 const SETTINGS = ['home', 'placeAliases', 'routeVersions', 'importedRoutes', 'skippedOps', 'quiet', 'transfer', 'placesAdded', 'doctorsAdded'];
 // Merged field by field, so a change made on each device survives.

@@ -15,6 +15,8 @@ export async function feedStatus() {
 }
 export const searchStops = q => call(`/feed/stops?q=${encodeURIComponent(q)}`);
 export const findLines = (from, to) => call('/feed/lines', { from: from.key, to: to.key });
+// Trips on the whole timetable. `from` and `to` are [{ key, walk }]; `time` is minutes of the day.
+export const planTrip = ({ from, to, date, time, arriveBy }) => call('/feed/plan', { from, to, date, time, arriveBy });
 export const feedResults = () => call('/feed/results');
 
 export const pairKey = feed => `${feed.from.key}>${feed.to.key}`;
@@ -45,19 +47,45 @@ export function fillOption(opt, line, updated) {
   if (ride != null) opt.minutes = ride;
 }
 
+// How one weekday's trips differ, as departures gone, new ones, and rides that got longer or shorter.
+export function tripChanges(before = [], after = []) {
+  const was = new Map(before.map(([d, r]) => [d, r])), now = new Map(after.map(([d, r]) => [d, r]));
+  const removed = [...was.keys()].filter(d => !now.has(d)), added = [...now.keys()].filter(d => !was.has(d));
+  const rides = [...now].filter(([d, r]) => was.has(d) && was.get(d) !== r).map(([d, r]) => [d, was.get(d), r]);
+  return removed.length || added.length || rides.length ? { removed, added, rides } : null;
+}
+
 // Brings every step that uses the timetable up to date. Returns whether anything changed.
-export function applyResults(routes, results) {
+// A step that already had trips adds what changed to `notes`, per day of the coming week.
+export function applyResults(routes, results, notes = null) {
   let changed = false;
   for (const r of routes) for (const l of r.legs) {
     for (const { opt, feed } of fedOptions(l)) {
       const lines = results.pairs?.[pairKey(feed)];
       if (!lines || !opt.feedLine) continue;
-      const before = JSON.stringify([opt.trips, opt.feedDate]);
+      const old = opt.trips, before = JSON.stringify([opt.trips, opt.feedDate]);
       fillOption(opt, lines.find(x => x.id === opt.feedLine), results.updated);
-      if (JSON.stringify([opt.trips, opt.feedDate]) !== before) changed = true;
+      if (JSON.stringify([opt.trips, opt.feedDate]) === before) continue;
+      changed = true;
+      if (!notes || !old) continue;
+      for (let wd = 0; wd < 7; wd++) {
+        const diff = tripChanges(old[wd], opt.trips[wd]);
+        if (diff) notes.push({ route: r.name, routeId: r.id, line: opt.label || opt.name || l.label, from: feed.from.name, to: feed.to.name, weekday: wd, date: results.days?.[wd] || null, ...diff });
+      }
     }
   }
   return changed;
+}
+
+const clock = m => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+const few = list => (list.length > 6 ? `${list.slice(0, 6).map(clock).join(', ')} and ${list.length - 6} more` : list.map(clock).join(', '));
+// "no longer 23:15; new: 23:00; the 07:57 now takes 38 min, was 36"
+export function changeText(c) {
+  return [
+    c.removed.length ? `no longer ${few(c.removed)}` : null,
+    c.added.length ? `new: ${few(c.added)}` : null,
+    ...c.rides.slice(0, 3).map(([d, was, now]) => `the ${clock(d)} now takes ${now} min, was ${was}`),
+  ].filter(Boolean).join('; ');
 }
 
 // "61 a day, 38–47 min" for a line, from its busiest day.

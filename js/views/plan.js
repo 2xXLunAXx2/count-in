@@ -1,14 +1,14 @@
 // The Plan page: one day from leaving home to getting back, with travel and breaks.
 import { state, save, emit } from '../store.js';
 import { h, addDays, startOfDay, fmt, fmtTime, fmtClock, norm, inkOn, sameDay, ymd, MIN } from '../util.js';
-import { calById, catOf, colorOf, visibleEvents, network, placeNames, isKnownPlace, routerFor } from '../core.js';
-import { buildDayPlan } from '../plan.js';
+import { calById, catOf, colorOf, visibleEvents, network, placeNames, isKnownPlace, routerFor, createEvent, timeBody } from '../core.js';
+import { buildDayPlan, practiceSlots } from '../plan.js';
 import { matchPlace } from '../transit.js';
 import { placeFromText } from '../myroutes.js';
 import { writable } from '../rules.js';
 import { openEditor, openNewEvent } from './editor.js';
 import { ribbon, legRow, addToCalendar } from './routes.js';
-import { openRouteEditor, startTrip, missingTimesHelp } from './myroutes.js';
+import { openRouteEditor, startTrip, missingTimesHelp, changesCard, timedOn } from './myroutes.js';
 import { toast, icon } from '../ui.js';
 
 export const homePlace = () => state.settings.home || state.route.from || '';
@@ -34,21 +34,105 @@ function resolvePlace(ev) {
 
 let memoKey = '', memo = new Map();
 
+// The events Day plan counts for a day.
+const dayEvents = dayMs => visibleEvents()
+  .filter(e => !e.allDay && !e.notAccepted && e.endMs > dayMs && e.startMs < addDays(dayMs, 1))
+  .map(e => ({ ...e, optional: !!e.free || !writable(calById(e.calId)) }));
+
+// Plans a day from a list of events, as Day plan does.
+const planner = dayMs => {
+  const router = routerFor(dayMs), net = network();
+  return events => buildDayPlan({ events, dayMs, home: homePlace(), net, router, resolve: resolvePlace, early: +state.route.early || 0, transfer: +state.settings.transfer || 4 });
+};
+
 // Calculated on demand and remembered until something the plan depends on changes.
 export function planFor(dayMs) {
   const s = state.settings;
   const key = JSON.stringify([state.feeds.map(f => f.id), state.walkLog.map(w => w.id), state.places, state.myRoutes, state.legSamples.map(x => x.id), state.routeChoices, homePlace(), state.route.early, s.transfer, s.placeAliases, state.categories.map(c => c.place || '')]);
   if (key !== memoKey) { memoKey = key; memo = new Map(); }
-  const dayEnd = addDays(dayMs, 1);
-  const events = visibleEvents()
-    .filter(e => !e.allDay && !e.notAccepted && e.endMs > dayMs && e.startMs < dayEnd)
-    .map(e => ({ ...e, optional: !!e.free || !writable(calById(e.calId)) }));
-  const sig = events.map(e => `${e.id}|${e.startMs}|${e.endMs}|${e.location}|${e.optional}|${e.colorId}|${e.summary}`).join(';');
+  const events = dayEvents(dayMs);
+  const sig = events.map(e => `${e.id}|${e.startMs}|${e.endMs}|${e.location}|${e.optional}|${e.colorId}|${e.summary}|${e.ext?.arrive || ''}|${e.ext?.leave || ''}`).join(';');
   const hit = memo.get(dayMs);
   if (hit && hit.sig === sig) return hit.plan;
-  const plan = buildDayPlan({ events, dayMs, home: homePlace(), net: network(), router: routerFor(dayMs), resolve: resolvePlace, early: +state.route.early || 0, transfer: +s.transfer || 4 });
+  const plan = planner(dayMs)(events);
   memo.set(dayMs, { sig, plan });
   return plan;
+}
+
+/* ---------- Find practice time ---------- */
+// Like Music Room's free time, but with the trip to the practice place and on from it.
+const finder = { results: null, busy: false, open: false };
+const PRACTICE = () => ({ minutes: 120, place: 'MyTone', title: 'Drum Practice', ...state.settings.practice });
+
+export async function findPracticeTime(now = Date.now()) {
+  const p = PRACTICE();
+  Object.assign(finder, { busy: true, open: true }); emit();
+  const days = [];
+  const today = startOfDay(now);
+  for (let i = 0; i < 7; i++) {
+    const dayMs = addDays(today, i);
+    // Today starts from now, with a quarter of an hour to get going.
+    const from = i === 0 ? Math.max(6 * 60, Math.ceil(((now - dayMs) / MIN + 15) / 15) * 15) : 6 * 60;
+    const events = dayEvents(dayMs);
+    const { windows, missing } = practiceSlots({ events, dayMs, place: p.place, minutes: +p.minutes || 60, title: p.title, from, build: planner(dayMs) });
+    const set = events.filter(e => norm(e.summary) === norm(p.title)).map(e => `${fmtTime(e.startMs)}–${fmtTime(e.endMs)}`);
+    days.push({ dayMs, windows, missing, set });
+    await new Promise(r => setTimeout(r)); // lets the page stay responsive between days
+  }
+  Object.assign(finder, { results: { days, for: p }, busy: false });
+  emit();
+}
+
+async function addPractice(dayMs, startMin) {
+  const p = finder.results.for;
+  const cal = state.calendars.find(c => c.primary && writable(c)) || state.calendars.find(writable);
+  if (!cal) { toast('None of your calendars can be edited.', { error: true }); return; }
+  const start = dayMs + startMin * MIN, end = start + p.minutes * MIN;
+  try {
+    await createEvent(cal.id, { summary: p.title, location: p.place, ...timeBody(null, start, end, false) });
+    toast(`Added ${p.title}, ${fmt(dayMs, { weekday: 'short', day: 'numeric', month: 'short' })} ${fmtClock(startMin)}–${fmtClock(startMin + p.minutes)}`);
+    findPracticeTime();
+  } catch (e) { toast(e.message, { error: true }); }
+}
+
+function practiceCard() {
+  const p = PRACTICE(), r = finder.results;
+  const set = patch => { state.settings.practice = { ...PRACTICE(), ...patch }; save('settings'); };
+  const where = r ? r.for : p;
+  const windowRow = (d, w) => {
+    const starts = [];
+    for (let s = w.first; s <= w.last; s += 15) starts.push(s);
+    // The trips shown are for the start picked, so each choice says when to leave.
+    const trips = h('div', { class: 'practice-trips' });
+    const show = s => {
+      const f = w.trips[s];
+      trips.replaceChildren(...[
+        f.there ? h('p', { class: 'hint' }, 'Leave ', h('bdi', null, f.there.from), ` at ${fmtTime(f.there.leave)}, there by ${fmtTime(f.there.arrive)}`) : h('p', { class: 'hint' }, 'You are already there'),
+        f.next ? h('p', { class: 'hint' }, f.next.home ? 'Then home' : ['Then on to ', h('bdi', null, f.next.to)], f.next.arrive ? ` by ${fmtTime(f.next.arrive)}` : '') : null,
+      ].filter(Boolean));
+    };
+    const pick = h('select', { class: 'practice-start', 'aria-label': 'Start at', onchange: e => show(+e.target.value) }, starts.map(s => h('option', { value: s }, `${fmtClock(s)}–${fmtClock(s + where.minutes)}`)));
+    show(w.first);
+    return h('li', { class: 'practice-window' },
+      h('div', null, h('b', null, w.last > w.first ? `Start ${fmtClock(w.first)} to ${fmtClock(w.last)}` : `${fmtClock(w.first)}–${fmtClock(w.first + where.minutes)}`), trips),
+      h('div', { class: 'row gap' }, pick, h('button', { type: 'button', class: 'btn ghost add-practice', onclick: () => addPractice(d.dayMs, +pick.value) }, 'Add to calendar')));
+  };
+  return h('details', { class: 'card practice-finder', open: finder.open, ontoggle: e => { finder.open = e.target.open; } },
+    h('summary', null, h('b', null, 'Find practice time'), h('span', { class: 'hint' }, ' with the trip there and back')),
+    h('div', { class: 'row gap wrap practice-form' },
+      h('label', { class: 'field' }, h('span', { class: 'field-label' }, 'Minutes'), h('input', { type: 'number', min: 15, max: 600, step: 15, class: 'practice-minutes', value: p.minutes, oninput: e => set({ minutes: Math.max(15, +e.target.value || 60) }) })),
+      h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Where'), h('select', { class: 'practice-place', onchange: e => set({ place: e.target.value }) }, state.places.map(x => h('option', { value: x.name, selected: norm(x.name) === norm(p.place) }, x.name)))),
+      h('label', { class: 'field grow' }, h('span', { class: 'field-label' }, 'Title in the calendar'), h('input', { dir: 'auto', class: 'practice-title', value: p.title, oninput: e => set({ title: e.target.value.trim() || 'Practice' }) })),
+      h('button', { type: 'button', class: 'btn primary find-practice', disabled: finder.busy, onclick: () => findPracticeTime() }, finder.busy ? 'Looking' : 'Find times')),
+    h('p', { class: 'hint' }, 'The next 7 days, between 06:00 and 21:30. Each time leaves room for the trip there, your next event or the trip home, and your arrive-early margin.'),
+    r ? h('ol', { class: 'practice-days' }, r.days.map(d => h('li', null,
+      h('h3', null, fmt(d.dayMs, { weekday: 'long', day: 'numeric', month: 'short' })),
+      d.set.length ? h('p', { class: 'hint' }, `${r.for.title} already planned: ${d.set.join(', ')}`) : null,
+      d.windows.length ? h('ul', { class: 'practice-windows' }, d.windows.map(w => windowRow(d, w))) : h('p', { class: 'hint' }, `No ${r.for.minutes}-minute gap fits with the travel.`),
+      d.missing.length ? h('div', { class: 'practice-missing' },
+        h('p', { class: 'tl-warn' }, 'More times would fit with a route ', d.missing.map((m, i) => [i ? ' and ' : '', 'from ', h('bdi', null, m.from), ' to ', h('bdi', null, m.to)]),
+          '. Plan a trip on Routes can find one and save it.'),
+        d.missing.map(m => h('button', { type: 'button', class: 'link', onclick: () => openRouteEditor(null, { from: m.from, to: m.to }) }, 'Add ', h('bdi', null, m.from), ' → ', h('bdi', null, m.to)))) : null))) : null);
 }
 
 export function openPlan(dayMs) {
@@ -118,19 +202,24 @@ function tripChoices(j) {
         const on = (state.routeChoices[j.choiceKey]?.on || []).filter(x => x !== l.id);
         setChoice(j.choiceKey, { on: e.target.checked ? [...on, l.id] : on });
       } }),
-      h('bdi', null, l.label), ` (+${l.minutes} min)`)));
+      h('bdi', null, l.label), l.way ? [' instead of ', h('bdi', null, l.instead), l.until ? `, if you are there by ${l.until}` : ''] : ` (+${l.minutes} min)`)));
 }
 
 function travelRow(i, dayMs) {
   const j = i.journey;
   const transfer = +state.settings.transfer || 4;
   const route = state.myRoutes.find(r => r.id === j.routeId);
+  // A trip you already timed happened as timed, so it is not planned again with warnings.
+  const timed = route ? timedOn(route, ymd(dayMs)) : null;
   return row(i, fmtClock(j.depart), [
     h('div', { class: 'tl-travel' },
       h('p', { class: 'tl-travel-head' }, h('b', null, i.home ? 'Travel home' : 'Travel to ', i.home ? null : h('bdi', null, i.to)), ` · ${dur(j.arrive - j.depart)}`),
       ribbon(j),
-      i.late ? h('p', { class: 'tl-warn' }, `You will be ${dur(i.late)} late. The soonest arrival is ${fmtClock(j.arrive)}.`) : null,
-      i.leaveEarly ? h('p', { class: 'tl-warn' }, `Leave ${dur(i.leaveEarly)} before the previous event ends to make this.`) : null,
+      timed ? h('p', { class: 'hint timed-trip' }, timed.left ? `You timed this trip: left ${fmtTime(timed.left)}, arrived ${fmtTime(timed.arrived)}.` : 'You timed this trip.',
+        timed.note ? [' ', h('bdi', null, timed.note)] : '') : null,
+      i.late && !timed ? h('p', { class: 'tl-warn' }, `You will be ${dur(i.late)} late. The soonest arrival is ${fmtClock(j.arrive)}.`) : null,
+      i.leaveEarly && !timed ? h('p', { class: 'tl-warn' }, `Leave ${dur(i.leaveEarly)} before the previous event ends to make this.`) : null,
+      j.fallback ? h('p', { class: 'tl-warn' }, `No usual route works at this hour, so this is "${j.name}".`) : null,
       j.legs.some(l => l.noTimes) ? h('p', { class: 'tl-warn no-times' }, `${j.legs.filter(l => l.noTimes).map(l => l.label).join(', ')}: departure times have not loaded, so these times are guesses. `, missingTimesHelp()) : null,
       tripChoices(j),
       route ? h('button', { type: 'button', class: 'btn ghost tl-timer', onclick: () => startTrip(route) }, 'Start timer') : null,
@@ -223,6 +312,8 @@ export function renderPlan() {
           firstGap ? openNewEvent(firstGap.start, Math.min(firstGap.end, firstGap.start + 30 * MIN), 'Break') : openNewEvent(noon, noon + 30 * MIN, 'Break');
         } }, 'Add break'))),
     summaryBar(plan),
+    changesCard(),
+    practiceCard(),
     allDay.length ? h('p', { class: 'plan-allday', dir: 'auto' }, `All day: ${allDay.map(e => e.summary).join(', ')}`) : null,
     plan.items.length ? h('ol', { class: 'timeline' }, (() => {
       const { homeAt } = plan.summary;

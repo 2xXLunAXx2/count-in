@@ -147,7 +147,8 @@ async function start() {
   render();
   loadPreparedRoutes();
   // On the computer, the helper's timetable keeps steps current; the phone has no helper.
-  if (isLocal()) { syncTimetable(); setInterval(() => { if (!document.hidden) syncTimetable(); }, 10 * 60000); }
+  // Routes prepared after the page opened show up without reloading it.
+  if (isLocal()) { syncTimetable(); setInterval(() => { if (!document.hidden) { syncTimetable(); loadPreparedRoutes(); } }, 10 * 60000); }
   checkServer();
   setInterval(checkServer, 60000);
   window.addEventListener('hashchange', () => { const p = location.hash.slice(1); if (PAGES.some(x => x[0] === p) && p !== state.view.page) go(p); });
@@ -158,6 +159,7 @@ async function start() {
     if (document.hidden) return;
     // Coming back to the app is when another device's trip or times matter.
     cloudSync();
+    loadPreparedRoutes();
     if (Date.now() - state.sync.at > 60000) sync();
   });
   let lastNarrow = window.innerWidth < 760;
